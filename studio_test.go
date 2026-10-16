@@ -141,6 +141,107 @@ func TestGenDraftPreservesFinal(t *testing.T) {
 
 func joinS(s []string) string { return strings.Join(s, "|") }
 
+// 重生成时 line_ids 不变的 clip 必须沿用旧 clip_id（批注引用不失效）；
+// 内容变掉的旧 id 不得再分配给新 clip（批注悬空可见，而非静默指错）。
+func TestGenDraftStableIDs(t *testing.T) {
+	sc := newSceneWithDraft(t)
+	oldIDs := map[string][]string{}
+	for _, c := range sc.Clips {
+		oldIDs[c.ClipID] = append([]string(nil), c.LineIDs...)
+	}
+	clips2, _, err := GenDraft(sc, sc.Clips)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range clips2 {
+		if got := joinS(c.LineIDs); got != joinS(oldIDs[c.ClipID]) {
+			t.Errorf("clip %s 的 line_ids 变了：%s → %s", c.ClipID, joinS(oldIDs[c.ClipID]), got)
+		}
+	}
+	// 删掉中间一句 → 重生成后分组变化，被淘汰的旧 id 不能回收再用
+	sc.Script.Lines = append(sc.Script.Lines[:1], sc.Script.Lines[2:]...)
+	clips3, _, err := GenDraft(sc, sc.Clips)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stillUsed := map[string][]string{}
+	for _, c := range clips3 {
+		stillUsed[c.ClipID] = c.LineIDs
+	}
+	for oldID, oldLines := range oldIDs {
+		if newLines, ok := stillUsed[oldID]; ok && joinS(newLines) != joinS(oldLines) {
+			t.Errorf("旧 clip_id %s 被回收给了不同内容（%s → %s）", oldID, joinS(oldLines), joinS(newLines))
+		}
+	}
+}
+
+// 已标 stale 的 clip 重生成后必须保留 stale——改过台词的成片不能
+// 被静默当成有效版本。
+func TestGenDraftPreservesStale(t *testing.T) {
+	sc := newSceneWithDraft(t)
+	target := sc.Clips[0].LineIDs[0]
+	if err := sc.UpdateLine(target, "改过之后还是原句长度", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	clips2, _, err := GenDraft(sc, sc.Clips)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range clips2 {
+		if joinS(c.LineIDs) == joinS(sc.Clips[0].LineIDs) {
+			found = true
+			if !c.Stale {
+				t.Error("stale 标记在重生成后丢失")
+			}
+			if c.ClipID != sc.Clips[0].ClipID {
+				t.Error("line_ids 未变但 clip_id 变了")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("找不到对应 clip")
+	}
+}
+
+// 台词正文里的"走/停/转"不能触发动作——只有 direction 字段能产指令。
+func TestGenDraftDirectionOnly(t *testing.T) {
+	sc := fixtureScene(t)
+	sc.Script.Lines = []dubbing.ScriptLine{
+		{LineID: "l01", SceneID: "s1", RoleID: "narrator", Text: "我们走吧，别再回头看了。"},
+		{LineID: "l02", SceneID: "s1", RoleID: "character-a", Text: "好，你先走。", Direction: "转身离开"},
+	}
+	clips, _, err := GenDraft(sc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var l01Acts, l02Acts []string
+	for _, c := range clips {
+		for _, b := range c.Beats {
+			if b.Kind != "action" || b.Action == "talk" || b.Action == "enter" {
+				continue
+			}
+			// 用 at_ms 归属判断动作属于哪句（action 在台词起点展开）
+			for _, lb := range c.Beats {
+				if lb.Kind == "line" && lb.AtMs == b.AtMs {
+					if lb.LineID == "l01" {
+						l01Acts = append(l01Acts, b.Action)
+					}
+					if lb.LineID == "l02" {
+						l02Acts = append(l02Acts, b.Action)
+					}
+				}
+			}
+		}
+	}
+	if len(l01Acts) > 0 {
+		t.Errorf("台词正文触发了动作 %v——只应解析 direction", l01Acts)
+	}
+	if len(l02Acts) == 0 {
+		t.Error("direction「转身离开」没有产生动作")
+	}
+}
+
 // ---------- ops ----------
 
 func newSceneWithDraft(t *testing.T) *Scene {
@@ -292,6 +393,26 @@ func TestDeleteDuplicateTrim(t *testing.T) {
 	}
 }
 
+// 删台词必须同步删掉引用它的 line beats——否则时间线上会留下播放
+// 已删台词音频的孤儿事件。
+func TestDeleteLineCleansBeats(t *testing.T) {
+	sc := newSceneWithDraft(t)
+	lid := sc.Script.Lines[0].LineID
+	if err := sc.DeleteLine(lid); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range sc.Clips {
+		for _, b := range c.Beats {
+			if b.Kind == "line" && b.LineID == lid {
+				t.Errorf("clip %s 残留指向已删台词 %s 的 beat", c.ClipID, lid)
+			}
+		}
+	}
+	if err := sc.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUpdateLineStale(t *testing.T) {
 	sc := newSceneWithDraft(t)
 	lid := sc.Script.Lines[1].LineID
@@ -431,6 +552,134 @@ func TestFeedbackExport(t *testing.T) {
 		t.Error("非法状态应报错")
 	}
 	_ = ws
+}
+
+// ---------- 编辑接口健壮性 ----------
+
+func mustSceneEditErr(t *testing.T, st *Studio, dir, op string) string {
+	t.Helper()
+	res := st.SceneEdit(dir, op)
+	var env struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(res), &env); err != nil {
+		t.Fatalf("SceneEdit 返回非法 JSON: %s", res)
+	}
+	if env.OK {
+		t.Fatalf("op 应被拒绝但成功了: %s", op)
+	}
+	return env.Error
+}
+
+// 畸形的 reorder 请求不得 panic 打崩进程。
+func TestSceneEditMalformed(t *testing.T) {
+	dir := t.TempDir()
+	st := &Studio{}
+	sc := newSceneWithDraft(t)
+	if err := st.saveScene(dir, sc, false); err != nil {
+		t.Fatal(err)
+	}
+	mustSceneEditErr(t, st, dir, `{"op":"reorder","order":"not-an-array"}`)
+	mustSceneEditErr(t, st, dir, `{"op":"reorder","order":[1,2,3]}`)
+	mustSceneEditErr(t, st, dir, `{"op":"reorder"}`)
+}
+
+// base_rev 乐观并发：过期修订版的写请求要被拒，正确版本要通过。
+func TestSceneEditBaseRev(t *testing.T) {
+	dir := t.TempDir()
+	st := &Studio{}
+	sc := newSceneWithDraft(t)
+	if err := st.saveScene(dir, sc, false); err != nil {
+		t.Fatal(err)
+	}
+	cur, err := loadScene(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lid := sc.Script.Lines[0].LineID
+	mustSceneEditErr(t, st, dir,
+		fmt.Sprintf(`{"op":"update_line","line_id":%q,"text":"x","base_rev":%d}`, lid, cur.Revision+99))
+	res := st.SceneEdit(dir,
+		fmt.Sprintf(`{"op":"update_line","line_id":%q,"text":"x","base_rev":%d}`, lid, cur.Revision))
+	var env struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal([]byte(res), &env); err != nil || !env.OK {
+		t.Fatalf("正确 base_rev 应通过: %s", res)
+	}
+}
+
+// set_take 记录 take 指纹；换 take 后旧 timeline 自动判过期。
+func TestSetTakeInvalidatesTimeline(t *testing.T) {
+	dir := t.TempDir()
+	st := &Studio{}
+	sc := newSceneWithDraft(t)
+	if err := st.saveScene(dir, sc, false); err != nil {
+		t.Fatal(err)
+	}
+	take1 := filepath.Join(t.TempDir(), "a.wav")
+	take2 := filepath.Join(t.TempDir(), "b.wav")
+	wav, _ := base64.StdEncoding.DecodeString(engineTestWAV(t))
+	os.WriteFile(take1, wav, 0o644)
+	os.WriteFile(take2, append(wav, 0), 0o644) // 大小不同 → 指纹必不同
+
+	res := st.SceneEdit(dir, fmt.Sprintf(`{"op":"set_take","path":%q}`, take1))
+	var env struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal([]byte(res), &env); err != nil || !env.OK {
+		t.Fatalf("set_take: %s", res)
+	}
+	cur, _ := loadScene(dir)
+	if cur.Audio.TakeSig == "" {
+		t.Fatal("set_take 没记录指纹")
+	}
+	// 模拟一份基于 take1 的 timeline
+	cur.Audio.Timeline = "/tmp/timeline.json"
+	cur.Audio.TimelineSig = cur.Audio.TakeSig
+	if cur.Audio.TimelineStale() {
+		t.Fatal("同 take 的 timeline 不应过期")
+	}
+	if err := st.saveScene(dir, cur, false); err != nil {
+		t.Fatal(err)
+	}
+	// 换 take2 → timeline 过期
+	res = st.SceneEdit(dir, fmt.Sprintf(`{"op":"set_take","path":%q}`, take2))
+	if err := json.Unmarshal([]byte(res), &env); err != nil || !env.OK {
+		t.Fatalf("set_take2: %s", res)
+	}
+	cur, _ = loadScene(dir)
+	if !cur.Audio.TimelineStale() {
+		t.Error("换 take 后旧 timeline 应判过期")
+	}
+}
+
+// 同秒重名 take 不得互相覆盖。
+func TestSaveRecordingDedup(t *testing.T) {
+	st := &Studio{}
+	dir := t.TempDir()
+	wav := engineTestWAV(t)
+	var p1, p2 string
+	for _, dst := range []*string{&p1, &p2} {
+		res := st.SaveRecording(dir, wav, "take-120000")
+		var env struct {
+			OK   bool `json:"ok"`
+			Data struct {
+				Path string `json:"path"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(res), &env); err != nil || !env.OK {
+			t.Fatalf("save: %s", res)
+		}
+		*dst = env.Data.Path
+	}
+	if p1 == p2 {
+		t.Error("同名 take 互相覆盖")
+	}
+	if _, err := os.Stat(p1); err != nil {
+		t.Error("第一条 take 丢了")
+	}
 }
 
 // ---------- 录音 / 媒体服务 ----------

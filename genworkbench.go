@@ -160,20 +160,21 @@ func genVoiceDemo(ws, _ string) error {
 		return err
 	}
 	m, err := dubbing.Render(dubbing.RenderOptions{
-		TimelinePath: filepath.Join(sess, "timeline.json"),
-		AudioPath:    take,
-		VoicesPath:   vp,
-		OutDir:       filepath.Join(sess, "rendered"),
-		WriteSrc:     true,
+		TimelinePath:    filepath.Join(sess, "timeline.json"),
+		AudioPath:       take,
+		VoicesPath:      vp,
+		OutDir:          filepath.Join(sess, "rendered"),
+		WriteSrc:        true,
 		AllowUnreviewed: true,
 	})
 	if err != nil {
 		return err
 	}
-	// 回写音频状态
-	scene.Audio = AudioState{Take: take, Session: sess,
-		Timeline: filepath.Join(sess, "timeline.json"),
-		Rendered: filepath.Join(sess, "rendered")}
+	// 回写音频状态（带输入指纹，供"是否过期"判断）
+	tlPath := filepath.Join(sess, "timeline.json")
+	scene.Audio = AudioState{Take: take, TakeSig: fileSig(take), Session: sess,
+		Timeline: tlPath, TimelineSig: fileSig(take),
+		Rendered: filepath.Join(sess, "rendered"), RenderedSig: fileSig(tlPath)}
 	if err := st.saveScene(sceneDir, scene, false); err != nil {
 		return err
 	}

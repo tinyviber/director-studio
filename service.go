@@ -104,6 +104,12 @@ func (s *Studio) saveScene(dir string, sc *Scene, snap bool) error {
 	if snap && old != nil {
 		s.snapshot(dir, old)
 	}
+	// Revision 单调递增：以毫秒时间戳为主，undo/外部回退后不回退。
+	rev := int(time.Now().UnixMilli())
+	if old != nil && rev <= old.Revision {
+		rev = old.Revision + 1
+	}
+	sc.Revision = rev
 	sc.normalize()
 	if err := sc.Validate(); err != nil {
 		return err
@@ -113,6 +119,32 @@ func (s *Studio) saveScene(dir string, sc *Scene, snap bool) error {
 		return err
 	}
 	return dubbing.WriteFileAtomic(sceneFile(dir), b, 0o644)
+}
+
+// fileSig 是文件的轻量指纹（大小+mtime）。配音产物有效性靠它判断；
+// 音频文件大，不算内容 hash。
+func fileSig(p string) string {
+	if p == "" {
+		return ""
+	}
+	st, err := os.Stat(p)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%x:%x", st.Size(), st.ModTime().UnixNano())
+}
+
+// decorateScene 在返回前端前注入派生状态：配音链路各产物是否因输入
+// 变化而过期（timeline 基于别的 take、rendered 基于别的 timeline）。
+func (s *Studio) decorateScene(sc *Scene) {
+	if sc.Meta == nil {
+		sc.Meta = map[string]any{}
+	}
+	sc.Meta["audio_status"] = map[string]any{
+		"timeline_stale": sc.Audio.TimelineStale(),
+		"rendered_stale": sc.Audio.Rendered != "" &&
+			sc.Audio.RenderedSig != fileSig(sc.Audio.Timeline),
+	}
 }
 
 // ---------- 绑定方法：workspace / scene ----------
@@ -203,6 +235,7 @@ func (s *Studio) LoadScene(dir string) string {
 	}
 	sc.normalize()
 	s.mediaSrv().allow(dir)
+	s.decorateScene(sc)
 	return okJSON(sc)
 }
 
@@ -215,6 +248,7 @@ func (s *Studio) SaveScene(dir, payload string) string {
 	if err := s.saveScene(dir, sc, true); err != nil {
 		return errJSON(err)
 	}
+	s.decorateScene(sc)
 	return okJSON(sc)
 }
 
@@ -239,6 +273,7 @@ func (s *Studio) GenDraft(dir string) string {
 		return errJSON(err)
 	}
 	s.snapshot(dir, before)
+	s.decorateScene(sc)
 	return okJSON(map[string]any{"scene": sc, "warnings": warns,
 		"elapsed_ms": float64(time.Since(t0)) / 1e6})
 }
@@ -246,7 +281,13 @@ func (s *Studio) GenDraft(dir string) string {
 // SceneEdit 应用一个编辑操作：{"op":"reorder"|"split"|"delete"|"duplicate"|
 // "trim"|"set_source"|"update_line"|"add_line"|"delete_line"|"add_feedback"|
 // "feedback_status"|"set_role_voice"|"note", ...}
-func (s *Studio) SceneEdit(dir, opJSON string) string {
+func (s *Studio) SceneEdit(dir, opJSON string) (ret string) {
+	// 前端 agent 也可能直接调这个绑定——畸形请求不能打崩 UI 进程。
+	defer func() {
+		if r := recover(); r != nil {
+			ret = errf("scene_edit: 非法请求 %v", r)
+		}
+	}()
 	var op map[string]any
 	if err := json.Unmarshal([]byte(opJSON), &op); err != nil {
 		return errJSON(fmt.Errorf("op JSON: %w", err))
@@ -255,6 +296,11 @@ func (s *Studio) SceneEdit(dir, opJSON string) string {
 	if err != nil {
 		return errJSON(err)
 	}
+	// 乐观并发：调用方声明自己基于哪个修订版；不匹配说明场景在两次
+	// 读取之间被改过，拒绝这次写，避免静默覆盖别人的变更。
+	if br, ok := op["base_rev"].(float64); ok && int(br) != sc.Revision {
+		return errf("scene 已被修改（rev %d ≠ %d），请刷新后重试", sc.Revision, int(br))
+	}
 	kind, _ := op["op"].(string)
 	str := func(k string) string { v, _ := op[k].(string); return v }
 	num := func(k string) int { v, _ := op[k].(float64); return int(v) }
@@ -262,9 +308,17 @@ func (s *Studio) SceneEdit(dir, opJSON string) string {
 	var opErr error
 	switch kind {
 	case "reorder":
+		raw, ok := op["order"].([]any)
+		if !ok {
+			return errf("reorder: order 必须是数组")
+		}
 		var order []string
-		for _, v := range op["order"].([]any) {
-			order = append(order, v.(string))
+		for _, v := range raw {
+			sv, ok := v.(string)
+			if !ok {
+				return errf("reorder: order 元素必须是字符串")
+			}
+			order = append(order, sv)
 		}
 		opErr = sc.ReorderClips(order)
 	case "split":
@@ -324,6 +378,21 @@ func (s *Studio) SceneEdit(dir, opJSON string) string {
 		} else {
 			c.Note = str("text")
 		}
+	case "set_take":
+		p := str("path")
+		if p == "" {
+			opErr = fmt.Errorf("set_take: 空路径")
+			break
+		}
+		if _, err := os.Stat(p); err != nil {
+			opErr = fmt.Errorf("set_take: %w", err)
+			break
+		}
+		// 只换指纹不删下游产物——timeline/rendered 的 sig 从此对不上，
+		// UI 显示"已过期，需重新处理"，由导演决定何时重跑。
+		sc.Audio.Take = p
+		sc.Audio.TakeSig = fileSig(p)
+		s.mediaSrv().allow(filepath.Dir(p))
 	default:
 		return errf("未知 op %q", kind)
 	}
@@ -333,6 +402,7 @@ func (s *Studio) SceneEdit(dir, opJSON string) string {
 	if err := s.saveScene(dir, sc, true); err != nil {
 		return errJSON(err)
 	}
+	s.decorateScene(sc)
 	return okJSON(map[string]any{"scene": sc, "applied": op})
 }
 
@@ -357,6 +427,7 @@ func (s *Studio) Undo(dir string) string {
 	if err := s.saveScene(dir, prev, false); err != nil {
 		return errJSON(err)
 	}
+	s.decorateScene(prev)
 	return okJSON(prev)
 }
 
@@ -378,6 +449,7 @@ func (s *Studio) Redo(dir string) string {
 	if err := s.saveScene(dir, next, false); err != nil {
 		return errJSON(err)
 	}
+	s.decorateScene(next)
 	return okJSON(next)
 }
 
@@ -400,7 +472,14 @@ func (s *Studio) SaveRecording(workspace, b64wav, name string) string {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return errJSON(err)
 	}
+	// 文件名只有秒级精度时连录两条会撞名——存在即追加序号，不覆盖旧 take。
 	p := filepath.Join(dir, name+".wav")
+	for i := 2; ; i++ {
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			break
+		}
+		p = filepath.Join(dir, fmt.Sprintf("%s-%d.wav", name, i))
+	}
 	if err := os.WriteFile(p, raw, 0o644); err != nil {
 		return errJSON(err)
 	}
@@ -440,11 +519,13 @@ func (s *Studio) Analyze(sceneDir, takePath string) string {
 		return errJSON(err)
 	}
 	sc.Audio.Take = takePath
+	sc.Audio.TakeSig = fileSig(takePath)
 	sc.Audio.Session = filepath.Dir(tl.ASRFile)
 	if sc.Audio.Session == "." {
 		sc.Audio.Session = outBase
 	}
 	sc.Audio.Timeline = filepath.Join(sc.Audio.Session, "timeline.json")
+	sc.Audio.TimelineSig = sc.Audio.TakeSig // 这份对齐基于当前 take
 	if err := s.saveScene(sceneDir, sc, true); err != nil {
 		return errJSON(err)
 	}
@@ -488,6 +569,7 @@ func (s *Studio) RenderScene(sceneDir string) string {
 		return errJSON(err)
 	}
 	sc.Audio.Rendered = outDir
+	sc.Audio.RenderedSig = fileSig(sc.Audio.Timeline) // 这份渲染基于当前 timeline
 	if err := s.saveScene(sceneDir, sc, false); err != nil {
 		return errJSON(err)
 	}
@@ -582,7 +664,7 @@ func (s *Studio) MorphFile(path, presetOrParamsJSON string) string {
 	t0 := time.Now()
 	out := eng.Render(pcm)
 	return okJSON(map[string]any{
-		"wav": base64.StdEncoding.EncodeToString(engine.EncodeWAV(out, engine.SampleRate)),
+		"wav":        base64.StdEncoding.EncodeToString(engine.EncodeWAV(out, engine.SampleRate)),
 		"elapsed_ms": float64(time.Since(t0)) / 1e6, "in_hz": sr,
 	})
 }
@@ -705,7 +787,7 @@ func (s *Studio) ExportFeedback(sceneDir string) string {
 	jb, _ := json.MarshalIndent(map[string]any{
 		"version": 1, "scene_id": sc.SceneID, "exported": ts,
 		"constraints": "keep scene_id/clip_id/line_id stable; do not regenerate untouched clips",
-		"tasks": tasks,
+		"tasks":       tasks,
 	}, "", "  ")
 	if err := dubbing.WriteFileAtomic(jp, jb, 0o644); err != nil {
 		return errJSON(err)

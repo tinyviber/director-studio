@@ -38,15 +38,15 @@ type Role struct {
 
 // BeatEvent 是 clip 内的一个时间化事件：台词、动作、镜头、音效或标注。
 type BeatEvent struct {
-	AtMs   int    `json:"at_ms"`
-	Kind   string `json:"kind"` // line|action|camera|sfx|note
-	LineID string `json:"line_id,omitempty"`
-	Actor  string `json:"actor,omitempty"`  // role id
-	Action string `json:"action,omitempty"` // stand|sit|walk|point|talk|turn|surprise|smile|sad|nod|shake|enter|exit|idle
-	DurMs  int    `json:"dur_ms,omitempty"`
+	AtMs   int       `json:"at_ms"`
+	Kind   string    `json:"kind"` // line|action|camera|sfx|note
+	LineID string    `json:"line_id,omitempty"`
+	Actor  string    `json:"actor,omitempty"`  // role id
+	Action string    `json:"action,omitempty"` // stand|sit|walk|point|talk|turn|surprise|smile|sad|nod|shake|enter|exit|idle
+	DurMs  int       `json:"dur_ms,omitempty"`
 	From   []float64 `json:"from,omitempty"` // [x,y] 0..1 归一化
 	To     []float64 `json:"to,omitempty"`
-	Text   string `json:"text,omitempty"` // camera 镜头名 / sfx 名 / note 文本
+	Text   string    `json:"text,omitempty"` // camera 镜头名 / sfx 名 / note 文本
 }
 
 // ClipSource 描述 clip 的视觉来源；kind=draft（canvas 预演）或 video（正式素材）。
@@ -56,9 +56,9 @@ type ClipSource struct {
 }
 
 type Clip struct {
-	ClipID string   `json:"clip_id"`
-	Title  string   `json:"title,omitempty"`
-	DurMs  int      `json:"dur_ms"`
+	ClipID string      `json:"clip_id"`
+	Title  string      `json:"title,omitempty"`
+	DurMs  int         `json:"dur_ms"`
 	Beats  []BeatEvent `json:"beats"`
 	// LineIDs 是本 clip 依赖的台本行（顺序）。台词改动 → 只标这些 clip stale。
 	LineIDs []string `json:"line_ids,omitempty"`
@@ -97,32 +97,46 @@ type Feedback struct {
 	TakeRef    string `json:"take_ref,omitempty"` // 关联音频段/文件
 	Kind       string `json:"kind"`               // logic|pacing|visual|audio|other
 	Text       string `json:"text"`
-	Voice      string `json:"voice,omitempty"`    // 语音反馈的 wav 路径
+	Voice      string `json:"voice,omitempty"`      // 语音反馈的 wav 路径
 	VoiceText  string `json:"voice_text,omitempty"` // ASR 转写（若跑过）
 	Status     string `json:"status"`               // open|doing|done|wontfix
 	Resolution string `json:"resolution,omitempty"` // 处理说明/所用版本
 }
 
 // AudioState 记录这个 scene 的配音链路产物位置。
+// 产物关系是 Script→Take→Timeline→Rendered 的依赖链：每条产物记下它
+// 基于的输入指纹（sig），上游一变下游自动判过期——不删文件，但工作台
+// 能明确显示"输入已变化，需要重新处理"，而不是继续放不确定的音频。
 type AudioState struct {
-	Take     string `json:"take,omitempty"`     // 当前录音（audio/rec/*.wav）
-	Session  string `json:"session,omitempty"`  // dubbing 会话目录
-	Timeline string `json:"timeline,omitempty"` // 生效的 timeline(-reviewed).json
-	Rendered string `json:"rendered,omitempty"` // rendered/ 目录（manifest.json 在内）
+	Take        string `json:"take,omitempty"`         // 当前录音（audio/rec/*.wav）
+	TakeSig     string `json:"take_sig,omitempty"`     // 设置 take 时的文件指纹
+	Session     string `json:"session,omitempty"`      // dubbing 会话目录
+	Timeline    string `json:"timeline,omitempty"`     // 生效的 timeline(-reviewed).json
+	TimelineSig string `json:"timeline_sig,omitempty"` // timeline 基于的 take 指纹
+	Rendered    string `json:"rendered,omitempty"`     // rendered/ 目录（manifest.json 在内）
+	RenderedSig string `json:"rendered_sig,omitempty"` // rendered 基于的 timeline 指纹
+}
+
+// TimelineStale：timeline 产物基于的 take 已被更换。
+func (a AudioState) TimelineStale() bool {
+	return a.Timeline != "" && a.TakeSig != "" && a.TimelineSig != a.TakeSig
 }
 
 // Scene 是一个连续叙事/审核单位：台本 + draft clips + 编排 + 音频 + 反馈。
 type Scene struct {
-	Version  int            `json:"version"`
-	SceneID  string           `json:"scene_id"`
-	Title    string           `json:"title"`
-	Roles    []Role           `json:"roles"`
-	Script   dubbing.Script   `json:"script"`
-	Clips    []Clip           `json:"clips"`
-	Order    []string         `json:"order"`
-	Audio    AudioState       `json:"audio,omitempty"`
-	Feedback []Feedback       `json:"feedback,omitempty"`
-	Meta     map[string]any   `json:"meta,omitempty"`
+	Version int `json:"version"`
+	// Revision 每次写盘单调递增；SceneEdit 带 base_rev 做乐观并发检查，
+	// 防止前端基于过期副本提交、覆盖掉别人（含 agent）刚写入的改动。
+	Revision int            `json:"rev"`
+	SceneID  string         `json:"scene_id"`
+	Title    string         `json:"title"`
+	Roles    []Role         `json:"roles"`
+	Script   dubbing.Script `json:"script"`
+	Clips    []Clip         `json:"clips"`
+	Order    []string       `json:"order"`
+	Audio    AudioState     `json:"audio,omitempty"`
+	Feedback []Feedback     `json:"feedback,omitempty"`
+	Meta     map[string]any `json:"meta,omitempty"`
 }
 
 func (s *Scene) clip(id string) *Clip {
@@ -168,6 +182,9 @@ func (s *Scene) Validate() error {
 		for _, b := range c.Beats {
 			if b.AtMs < 0 || b.AtMs > c.DurMs {
 				return fmt.Errorf("scene: clip %s beat at_ms %d out of range", c.ClipID, b.AtMs)
+			}
+			if b.Kind == "line" && b.LineID != "" && s.line(b.LineID) == nil {
+				return fmt.Errorf("scene: clip %s beat 引用不存在的台词 %s", c.ClipID, b.LineID)
 			}
 		}
 		if c.Pick < 0 || c.Pick >= max(1, len(c.Candidates)) {
@@ -323,7 +340,7 @@ func indexOfStr(list []string, v string) int {
 
 func (s *Scene) nextClipID() string {
 	for i := 1; ; i++ {
-		id := fmt.Sprintf("c%03d", i)
+		id := fmt.Sprintf("c%02d", i)
 		if s.clip(id) == nil {
 			return id
 		}
@@ -510,6 +527,16 @@ func (s *Scene) DeleteLine(lineID string) error {
 					keep = append(keep, lid)
 				}
 				c.LineIDs = keep
+				// 同步删掉引用该台词的 line beats——留着会放出已删除
+				// 台词的音频，并让 Validate 抓不到孤儿引用。
+				keepB := c.Beats[:0]
+				for _, b := range c.Beats {
+					if b.Kind == "line" && b.LineID == lineID {
+						continue
+					}
+					keepB = append(keepB, b)
+				}
+				c.Beats = keepB
 				if had {
 					c.Stale = true
 				}
@@ -571,6 +598,8 @@ func ParseScene(b []byte) (*Scene, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, fmt.Errorf("scene: invalid JSON: %w", err)
 	}
+	// 先 normalize 自愈旧数据（孤儿 beats、缺 candidates），再严格校验。
+	s.normalize()
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
@@ -594,6 +623,15 @@ func (s *Scene) normalize() {
 		if len(s.Clips[i].Candidates) == 0 {
 			s.Clips[i].Candidates = []ClipSource{{Kind: "draft"}}
 		}
+		// 清掉引用已删台词的孤儿 line beats（旧数据或外部编辑可能残留）
+		keep := s.Clips[i].Beats[:0]
+		for _, b := range s.Clips[i].Beats {
+			if b.Kind == "line" && b.LineID != "" && s.line(b.LineID) == nil {
+				continue
+			}
+			keep = append(keep, b)
+		}
+		s.Clips[i].Beats = keep
 	}
 }
 
