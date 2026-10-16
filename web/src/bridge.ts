@@ -27,11 +27,16 @@ export interface Feedback {
   kind: string; text: string; voice?: string; voice_text?: string;
   status: "open" | "doing" | "done" | "wontfix"; resolution?: string;
 }
-export interface AudioState { take?: string; session?: string; timeline?: string; rendered?: string }
+export interface AudioState {
+  take?: string; take_sig?: string; session?: string;
+  timeline?: string; timeline_sig?: string;
+  rendered?: string; rendered_sig?: string;
+}
 export interface Scene {
-  version: number; scene_id: string; title: string;
+  version: number; rev?: number; scene_id: string; title: string;
   roles: Role[]; script: { version: number; lines: ScriptLine[] };
   clips: Clip[]; order: string[]; audio?: AudioState; feedback?: Feedback[];
+  meta?: Record<string, any>;
 }
 export interface TimelineSegment {
   segment_id: string; line_id?: string; role_id?: string;
@@ -177,8 +182,8 @@ function mockGenDraft(s: Scene) {
     beats.push({ at_ms: dur, kind: "line", line_id: l.line_id, actor: l.role_id, dur_ms: d });
     beats.push({ at_ms: dur, kind: "action", actor: l.role_id, action: "talk", dur_ms: d });
     if (l.direction?.includes("跳下")) beats.push({ at_ms: dur, kind: "action", actor: l.role_id, action: "walk", to: [0.5, 0.85] });
-    if (l.text.includes("回头") || l.direction?.includes("回头")) beats.push({ at_ms: dur, kind: "action", actor: l.role_id, action: "turn" });
-    if (l.text.includes("警觉")) beats.push({ at_ms: dur, kind: "action", actor: l.role_id, action: "surprise" });
+    if (l.direction?.includes("回头")) beats.push({ at_ms: dur, kind: "action", actor: l.role_id, action: "turn" });
+    if (l.direction?.includes("警觉")) beats.push({ at_ms: dur, kind: "action", actor: l.role_id, action: "surprise" });
     lines.push(l.line_id); dur += d;
   }
   flush();
@@ -230,6 +235,7 @@ const mockOps: Record<string, (s: Scene, op: any) => void> = {
     s.script.lines = s.script.lines.filter((x) => x.line_id !== op.line_id);
     s.clips.forEach((c) => {
       if (c.line_ids?.includes(op.line_id)) { c.stale = true; c.line_ids = c.line_ids!.filter((x) => x !== op.line_id); }
+      c.beats = c.beats.filter((b) => !(b.kind === "line" && b.line_id === op.line_id));
     });
   },
   add_feedback(s, op) {
@@ -239,6 +245,7 @@ const mockOps: Record<string, (s: Scene, op: any) => void> = {
   feedback_status(s, op) { s.feedback!.find((f) => f.id === op.id)!.status = op.status; },
   set_role_voice(s, op) { s.roles.find((r) => r.id === op.role_id)!.voice = { backend: "dsp", preset: op.preset }; },
   note(s, op) { s.clips.find((x) => x.clip_id === op.clip_id)!.note = op.text; },
+  set_take(s, op) { s.audio = { ...(s.audio ?? {}), take: op.path }; },
 };
 
 const mockTimeline: Timeline = {

@@ -20,6 +20,8 @@ var mediaExt = map[string]bool{
 	".wav": true, ".mp3": true, ".m4a": true, ".aac": true, ".ogg": true, ".flac": true,
 	".mp4": true, ".webm": true, ".mov": true, ".m4v": true,
 	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".svg": true,
+	// manifest.json 等配音产物元数据也要经媒体服务读给前端
+	".json": true,
 }
 
 type mediaServer struct {
