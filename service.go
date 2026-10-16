@@ -533,6 +533,11 @@ func (s *Studio) Analyze(sceneDir, takePath string) string {
 		return errJSON(err)
 	}
 	t0 := time.Now()
+	// 产物指纹按任务开始时的真实输入记录（take 指纹 + 此刻的台本）——
+	// 任务期间若台本被改，存下的 sig 与最新 expected 不符 → 自动判过期，
+	// 而不是拿新文档算出"有效"标记。
+	takeSig := fileSig(takePath)
+	tlSig := audioSig(takeSig, sc.scriptSig())
 	asr, tl, err := dubbing.Analyze(dubbing.AnalyzeOptions{
 		AudioPath: takePath, ScriptPath: tmpScript, OutDir: outBase,
 	})
@@ -540,33 +545,45 @@ func (s *Studio) Analyze(sceneDir, takePath string) string {
 	if err != nil {
 		return errJSON(err)
 	}
-	// ASR 耗时期间可能有编辑进来——把产物合并到最新 scene 上，
-	// 不能拿任务开始时的旧文档整份覆盖。
+	err = s.commitAudioArtifacts(sceneDir, true, func(fresh *Scene) {
+		// 任务期间换过 take 则不覆盖——timeline 是为旧 take 生成的，
+		// sig 对不上会自然判过期。
+		if fresh.Audio.Take == "" || fresh.Audio.Take == takePath {
+			fresh.Audio.Take, fresh.Audio.TakeSig = takePath, takeSig
+		}
+		fresh.Audio.Session = filepath.Dir(tl.ASRFile)
+		if fresh.Audio.Session == "." {
+			fresh.Audio.Session = outBase
+		}
+		fresh.Audio.Timeline = filepath.Join(fresh.Audio.Session, "timeline.json")
+		fresh.Audio.TimelineSig = tlSig
+	})
+	if err != nil {
+		return errJSON(err)
+	}
+	s.mediaSrv().allow(filepath.Dir(tl.ASRFile))
+	return okJSON(map[string]any{
+		"session": filepath.Dir(tl.ASRFile), "timeline": filepath.Join(filepath.Dir(tl.ASRFile), "timeline.json"),
+		"segments": len(tl.Segments), "review_count": tl.ReviewCount,
+		"unmatched": len(tl.UnmatchedLines), "asr": asr != nil,
+		"elapsed_ms": analyzeMs,
+	})
+}
+
+// commitAudioArtifacts 把耗时任务（ASR/Render）产出的音频状态合并到
+// 最新 scene：任务期间进来的编辑（改台本/换 take/改音色/加批注）不被覆盖；
+// 产物指纹按任务开始时的输入算好——存下的 sig 与最新 expected 不符时
+// 自动判过期，而不是误标有效。fn 在 st.mu 临界区内执行。
+func (s *Studio) commitAudioArtifacts(sceneDir string, snap bool, fn func(fresh *Scene)) error {
 	st := s.st(sceneDir)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	fresh, err := loadScene(sceneDir)
 	if err != nil {
-		return errJSON(err)
+		return err
 	}
-	fresh.Audio.Take = takePath
-	fresh.Audio.TakeSig = fileSig(takePath)
-	fresh.Audio.Session = filepath.Dir(tl.ASRFile)
-	if fresh.Audio.Session == "." {
-		fresh.Audio.Session = outBase
-	}
-	fresh.Audio.Timeline = filepath.Join(fresh.Audio.Session, "timeline.json")
-	fresh.Audio.TimelineSig = fresh.expectedTimelineSig() // take+台本指纹
-	if err := s.saveScene(sceneDir, fresh, true); err != nil {
-		return errJSON(err)
-	}
-	s.mediaSrv().allow(fresh.Audio.Session)
-	return okJSON(map[string]any{
-		"session": fresh.Audio.Session, "timeline": fresh.Audio.Timeline,
-		"segments": len(tl.Segments), "review_count": tl.ReviewCount,
-		"unmatched": len(tl.UnmatchedLines), "asr": asr != nil,
-		"elapsed_ms": analyzeMs,
-	})
+	fn(fresh)
+	return s.saveScene(sceneDir, fresh, snap)
 }
 
 // RenderScene 跑 dubbing.Render：timeline + voices.json → rendered lines + manifest。
@@ -590,6 +607,9 @@ func (s *Studio) RenderScene(sceneDir string) string {
 	if err := dubbing.WriteFileAtomic(vp, vb, 0o644); err != nil {
 		return errJSON(err)
 	}
+	// 产物指纹按渲染启动时的输入记录（timeline 文件 + 音色）——渲染期间
+	// 改过任何一项都会让存下的 sig 与最新 expected 不符 → 判过期。
+	rdSig := audioSig(fileSig(sc.Audio.Timeline), sc.voicesSig())
 	outDir := filepath.Join(sc.Audio.Session, "rendered")
 	t0 := time.Now()
 	m, err := dubbing.Render(dubbing.RenderOptions{
@@ -599,17 +619,11 @@ func (s *Studio) RenderScene(sceneDir string) string {
 	if err != nil {
 		return errJSON(err)
 	}
-	// 渲染耗时期间可能改过音色/timeline——合并到最新文档上。
-	st := s.st(sceneDir)
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	fresh, err := loadScene(sceneDir)
+	err = s.commitAudioArtifacts(sceneDir, false, func(fresh *Scene) {
+		fresh.Audio.Rendered = outDir
+		fresh.Audio.RenderedSig = rdSig
+	})
 	if err != nil {
-		return errJSON(err)
-	}
-	fresh.Audio.Rendered = outDir
-	fresh.Audio.RenderedSig = fresh.expectedRenderedSig() // timeline+音色指纹
-	if err := s.saveScene(sceneDir, fresh, false); err != nil {
 		return errJSON(err)
 	}
 	s.mediaSrv().allow(outDir)

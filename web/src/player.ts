@@ -62,12 +62,15 @@ export class Player {
     return parts.join("|");
   }
 
-  // audioKey 决定解码缓存/manifest 索引是否仍然有效：配音产物的路径
-  // 或指纹变了，缓存内容就不该再被复用。
+  // audioKey 决定解码缓存/manifest 索引与已调度音频是否仍然有效：
+  // 产物路径/指纹变了，或 audio_status 的 stale 位翻转（改台词、换 take、
+  // 改音色、手动存了 timeline），旧音频都不该继续播。
   private audioKeyFor(s: Scene | null): string {
     const a = s?.audio;
-    if (!a) return "";
-    return [a.take, a.take_sig, a.timeline, a.timeline_sig, a.rendered, a.rendered_sig].join("|");
+    const st = (s?.meta?.audio_status ?? {}) as { timeline_stale?: boolean; rendered_stale?: boolean };
+    if (!a) return st.timeline_stale || st.rendered_stale ? "stale" : "";
+    return [a.take, a.take_sig, a.timeline, a.timeline_sig, a.rendered, a.rendered_sig,
+      String(!!st.timeline_stale), String(!!st.rendered_stale)].join("|");
   }
 
   // setScene 换场景文档。preserve=true（编辑/undo 等同场景更新）时保留

@@ -373,6 +373,11 @@ async function saveTimeline() {
     toast("timeline 保存失败: " + e);
     return;
   }
+  // timeline 文件已变 → rendered 指纹对不上 → 重载 scene 拿新
+  // audio_status；播放器检测到 stale 位翻转会失效缓存并停止旧配音。
+  if (state.sceneDir) {
+    applyScene(await bridge.loadScene(state.sceneDir), true);
+  }
   renderVoice();
 }
 

@@ -356,6 +356,75 @@ func TestScriptAndVoiceInvalidateAudio(t *testing.T) {
 	if tlStale, rdStale := cur.AudioStatus(); tlStale || !rdStale {
 		t.Errorf("改音色后应只 rendered 过期，得到 tl=%v rd=%v", tlStale, rdStale)
 	}
+
+	// 手动改写/保存 timeline 文件 → rendered 过期、timeline 仍有效
+	tl3 := filepath.Join(t.TempDir(), "timeline.json")
+	os.WriteFile(tl3, []byte(`{"version":1,"segments":[]}`), 0o644)
+	sc3 := newSceneWithDraft(t)
+	sc3.Audio.Take, sc3.Audio.TakeSig = take, fileSig(take)
+	sc3.Audio.Timeline = tl3
+	sc3.Audio.TimelineSig = sc3.expectedTimelineSig()
+	sc3.Audio.Rendered = filepath.Join(t.TempDir(), "rendered")
+	sc3.Audio.RenderedSig = sc3.expectedRenderedSig()
+	if tlStale, rdStale := sc3.AudioStatus(); tlStale || rdStale {
+		t.Fatal("sc3 基线应为有效")
+	}
+	os.WriteFile(tl3, []byte(`{"version":1,"segments":[],"_":"manual edit"}`), 0o644)
+	if tlStale, rdStale := sc3.AudioStatus(); tlStale || !rdStale {
+		t.Errorf("手动存 timeline 后应只 rendered 过期，得到 tl=%v rd=%v", tlStale, rdStale)
+	}
+}
+
+// commitAudioArtifacts：耗时任务完成后合并产物——期间进来的编辑不丢，
+// 且产物指纹按任务开始时的输入算，台本中途被改 → 判过期而非误标有效。
+func TestCommitAudioArtifactsRace(t *testing.T) {
+	dir := t.TempDir()
+	st := &Studio{}
+	sc := newSceneWithDraft(t)
+	if err := st.saveScene(dir, sc, false); err != nil {
+		t.Fatal(err)
+	}
+	take := filepath.Join(t.TempDir(), "take.wav")
+	wav, _ := base64.StdEncoding.DecodeString(engineTestWAV(t))
+	os.WriteFile(take, wav, 0o644)
+
+	// 任务开始：按当时 take+台本算产物指纹
+	takeSig := fileSig(take)
+	tlSig := audioSig(takeSig, sc.scriptSig())
+
+	// 任务期间：另一处把台词正文改了
+	l0 := sc.Script.Lines[0]
+	res := st.SceneEdit(dir, fmt.Sprintf(
+		`{"op":"update_line","line_id":%q,"text":"改过的台词"}`, l0.LineID))
+	var env struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal([]byte(res), &env); err != nil || !env.OK {
+		t.Fatalf("mid-task edit: %s", res)
+	}
+
+	// 任务结束：合并产物（指纹是任务开始时算的）
+	err := st.commitAudioArtifacts(dir, true, func(fresh *Scene) {
+		fresh.Audio.Take, fresh.Audio.TakeSig = take, takeSig
+		fresh.Audio.Timeline = filepath.Join(dir, "timeline.json")
+		fresh.Audio.TimelineSig = tlSig
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cur, err := loadScene(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 编辑没被覆盖
+	if cur.Script.Lines[0].Text != "改过的台词" {
+		t.Error("任务期间的台本编辑被整份覆盖了")
+	}
+	// 产物基于旧台本 → 判过期，不能误标有效
+	if tlStale, _ := cur.AudioStatus(); !tlStale {
+		t.Error("台本在任务期间变更，产物应判过期")
+	}
 }
 
 // SaveScene 整份写回也要过 rev 检查——payload 版本落后即拒绝。
