@@ -1,12 +1,21 @@
 // media.go — 本地媒体文件服务。
 //
 // webview 里 <video>/<audio>/canvas drawImage 需要可 seek 的 URL。
-// 起一个 127.0.0.1 随机端口服务，按绝对路径出文件（?p=/abs/path），
+// 起一个 127.0.0.1 随机端口服务，按绝对路径出文件（?p=/abs/path&k=<token>），
 // 只允许 allow() 登记过的根目录下的媒体扩展名。Range 由
 // http.ServeContent 原生处理（206/416 正确），拖进度条即真 seek。
+//
+// 安全约定：本机任意网页都可能探测到 127.0.0.1 端口，所以
+//   - 每个进程一个随机 key，未带 key 的请求一律 403；
+//   - .json 只放行配音产物的 manifest.json，scene.json 等元数据不出服务；
+//   - 根目录与请求路径都做 EvalSymlinks 后再比对，符号链接不能越根。
+//
+// CORS 保持 *——fetch 需要它，真正的访问控制靠 key（不进入页面 DOM）。
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -20,18 +29,22 @@ var mediaExt = map[string]bool{
 	".wav": true, ".mp3": true, ".m4a": true, ".aac": true, ".ogg": true, ".flac": true,
 	".mp4": true, ".webm": true, ".mov": true, ".m4v": true,
 	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".svg": true,
-	// manifest.json 等配音产物元数据也要经媒体服务读给前端
-	".json": true,
 }
 
 type mediaServer struct {
 	base  string
+	key   string // 会话令牌：只经 MediaBase() 交给本应用 webview
 	mu    sync.Mutex
-	roots map[string]bool // 允许服务的根目录（绝对路径，cleaned）
+	roots map[string]bool // 允许服务的根目录（解析符号链接后的绝对路径）
 }
 
 func newMediaServer() (*mediaServer, error) {
 	m := &mediaServer{roots: map[string]bool{}}
+	kb := make([]byte, 16)
+	if _, err := rand.Read(kb); err != nil {
+		return nil, err
+	}
+	m.key = hex.EncodeToString(kb)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/m", m.serve)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -51,8 +64,12 @@ func (m *mediaServer) allow(dir string) {
 	if err != nil {
 		return
 	}
+	abs = filepath.Clean(abs)
+	if r, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = r // 存解析后的真实路径，比对时不会被 symlink 骗过
+	}
 	m.mu.Lock()
-	m.roots[filepath.Clean(abs)] = true
+	m.roots[abs] = true
 	m.mu.Unlock()
 }
 
@@ -65,6 +82,9 @@ func (m *mediaServer) allowed(p string) bool {
 		return false
 	}
 	abs = filepath.Clean(abs)
+	if r, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = r // 请求路径解析到真实位置再比对——指到根外的 symlink 会被拒
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for root := range m.roots {
@@ -76,14 +96,22 @@ func (m *mediaServer) allowed(p string) bool {
 }
 
 func (m *mediaServer) serve(w http.ResponseWriter, r *http.Request) {
+	if m.key == "" || r.URL.Query().Get("k") != m.key {
+		http.Error(w, "bad key", http.StatusForbidden)
+		return
+	}
 	p := r.URL.Query().Get("p")
 	if p == "" || !filepath.IsAbs(p) {
 		http.Error(w, "bad path", http.StatusBadRequest)
 		return
 	}
-	if !mediaExt[strings.ToLower(filepath.Ext(p))] {
-		http.Error(w, "not media", http.StatusForbidden)
-		return
+	ext := strings.ToLower(filepath.Ext(p))
+	if !mediaExt[ext] {
+		// .json 只放行 rendered/manifest.json——scene.json 等元数据不出服务。
+		if ext != ".json" || filepath.Base(p) != "manifest.json" {
+			http.Error(w, "not media", http.StatusForbidden)
+			return
+		}
 	}
 	if !m.allowed(p) {
 		http.Error(w, "outside roots", http.StatusForbidden)

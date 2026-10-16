@@ -16,6 +16,8 @@
 package main
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -117,9 +119,66 @@ type AudioState struct {
 	RenderedSig string `json:"rendered_sig,omitempty"` // rendered 基于的 timeline 指纹
 }
 
-// TimelineStale：timeline 产物基于的 take 已被更换。
-func (a AudioState) TimelineStale() bool {
-	return a.Timeline != "" && a.TakeSig != "" && a.TimelineSig != a.TakeSig
+// audioSig 把多个输入指纹合成一个短指纹（顺序敏感）。
+func audioSig(parts ...string) string {
+	h := sha1.New()
+	for _, p := range parts {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
+}
+
+// scriptSig 台本指纹：只含影响配音的字段（line_id/role_id/text）——
+// direction 改动不影响音频，不算进指纹。
+func (s *Scene) scriptSig() string {
+	type l struct {
+		ID, Role, Text string
+	}
+	lines := make([]l, 0, len(s.Script.Lines))
+	for _, x := range s.Script.Lines {
+		lines = append(lines, l{x.LineID, x.RoleID, x.Text})
+	}
+	b, _ := json.Marshal(lines)
+	return audioSig(string(b))
+}
+
+// voicesSig 角色变声参数指纹：预设或自定义参数变了，rendered 就该重渲。
+// 只含 id+voice——角色改名/换色不影响音频，不算进指纹。
+func (s *Scene) voicesSig() string {
+	type rv struct {
+		ID    string                `json:"id"`
+		Voice *dubbing.VoiceProfile `json:"voice"`
+	}
+	rs := make([]rv, 0, len(s.Roles))
+	for _, r := range s.Roles {
+		rs = append(rs, rv{r.ID, r.Voice})
+	}
+	b, _ := json.Marshal(rs)
+	return audioSig(string(b))
+}
+
+// expectedTimelineSig：当前 take + 台本应产生的 timeline 指纹。
+func (s *Scene) expectedTimelineSig() string {
+	return audioSig(s.Audio.TakeSig, s.scriptSig())
+}
+
+// expectedRenderedSig：当前 timeline + 变声参数应产生的 rendered 指纹。
+func (s *Scene) expectedRenderedSig() string {
+	return audioSig(fileSig(s.Audio.Timeline), s.voicesSig())
+}
+
+// AudioStatus 判断配音产物是否仍有效。过期是传递性的：
+// take/台本变了 → timeline 和 rendered 都过期；timeline/变声变了 → rendered 过期。
+func (s *Scene) AudioStatus() (timelineStale, renderedStale bool) {
+	a := s.Audio
+	if a.Timeline != "" && a.TimelineSig != s.expectedTimelineSig() {
+		timelineStale = true
+	}
+	if a.Rendered != "" && (timelineStale || a.RenderedSig != s.expectedRenderedSig()) {
+		renderedStale = true
+	}
+	return
 }
 
 // Scene 是一个连续叙事/审核单位：台本 + draft clips + 编排 + 音频 + 反馈。
@@ -127,16 +186,20 @@ type Scene struct {
 	Version int `json:"version"`
 	// Revision 每次写盘单调递增；SceneEdit 带 base_rev 做乐观并发检查，
 	// 防止前端基于过期副本提交、覆盖掉别人（含 agent）刚写入的改动。
-	Revision int            `json:"rev"`
-	SceneID  string         `json:"scene_id"`
-	Title    string         `json:"title"`
-	Roles    []Role         `json:"roles"`
-	Script   dubbing.Script `json:"script"`
-	Clips    []Clip         `json:"clips"`
-	Order    []string       `json:"order"`
-	Audio    AudioState     `json:"audio,omitempty"`
-	Feedback []Feedback     `json:"feedback,omitempty"`
-	Meta     map[string]any `json:"meta,omitempty"`
+	Revision int `json:"rev"`
+	// NextClipSeq 是 clip_id 的单调分配器：分配过的序号永不复用——
+	// 否则被淘汰的 clip_id 会在后续重生成中指到不同内容，让旧批注
+	// 静默挂错对象。它随 scene.json 持久化，跨任意多次重生成有效。
+	NextClipSeq int            `json:"next_clip_seq,omitempty"`
+	SceneID     string         `json:"scene_id"`
+	Title       string         `json:"title"`
+	Roles       []Role         `json:"roles"`
+	Script      dubbing.Script `json:"script"`
+	Clips       []Clip         `json:"clips"`
+	Order       []string       `json:"order"`
+	Audio       AudioState     `json:"audio,omitempty"`
+	Feedback    []Feedback     `json:"feedback,omitempty"`
+	Meta        map[string]any `json:"meta,omitempty"`
 }
 
 func (s *Scene) clip(id string) *Clip {
@@ -338,9 +401,26 @@ func indexOfStr(list []string, v string) int {
 	return -1
 }
 
+// ensureClipSeq 保证分配器起点越过所有现存 clip 序号（旧版数据没有
+// next_clip_seq 字段时，从现有 clip 推断）。
+func (s *Scene) ensureClipSeq() {
+	if s.NextClipSeq < 1 {
+		s.NextClipSeq = 1
+	}
+	for _, c := range s.Clips {
+		var n int
+		if _, err := fmt.Sscanf(c.ClipID, "c%d", &n); err == nil && n >= s.NextClipSeq {
+			s.NextClipSeq = n + 1
+		}
+	}
+}
+
+// nextClipID 从单调分配器取新 id——分配过的序号永不复用。
 func (s *Scene) nextClipID() string {
-	for i := 1; ; i++ {
-		id := fmt.Sprintf("c%02d", i)
+	s.ensureClipSeq()
+	for {
+		id := fmt.Sprintf("c%02d", s.NextClipSeq)
+		s.NextClipSeq++
 		if s.clip(id) == nil {
 			return id
 		}
@@ -618,6 +698,7 @@ func (s *Scene) normalize() {
 	if s.Script.Version == 0 {
 		s.Script.Version = 1
 	}
+	s.ensureClipSeq()
 	s.sortedBeats()
 	for i := range s.Clips {
 		if len(s.Clips[i].Candidates) == 0 {

@@ -173,8 +173,9 @@ func genVoiceDemo(ws, _ string) error {
 	// 回写音频状态（带输入指纹，供"是否过期"判断）
 	tlPath := filepath.Join(sess, "timeline.json")
 	scene.Audio = AudioState{Take: take, TakeSig: fileSig(take), Session: sess,
-		Timeline: tlPath, TimelineSig: fileSig(take),
-		Rendered: filepath.Join(sess, "rendered"), RenderedSig: fileSig(tlPath)}
+		Timeline: tlPath, Rendered: filepath.Join(sess, "rendered")}
+	scene.Audio.TimelineSig = scene.expectedTimelineSig()
+	scene.Audio.RenderedSig = scene.expectedRenderedSig()
 	if err := st.saveScene(sceneDir, scene, false); err != nil {
 		return err
 	}

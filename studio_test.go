@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"voice-morph/dubbing"
@@ -172,6 +173,228 @@ func TestGenDraftStableIDs(t *testing.T) {
 		if newLines, ok := stillUsed[oldID]; ok && joinS(newLines) != joinS(oldLines) {
 			t.Errorf("旧 clip_id %s 被回收给了不同内容（%s → %s）", oldID, joinS(oldLines), joinS(newLines))
 		}
+	}
+}
+
+// 连续重生成：被淘汰的 clip_id 永久退役，不得回收给新内容——
+// 否则挂在上面的旧批注会静默指向另一段素材。
+func TestGenDraftRetiredIDsNeverReused(t *testing.T) {
+	sc := newSceneWithDraft(t)
+	clips1, _, err := GenDraft(sc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.Clips = clips1
+	history := map[string][]string{} // 每个出现过的 id → 当时的 line_ids
+	mark := func(cs []Clip) {
+		for _, c := range cs {
+			if _, ok := history[c.ClipID]; !ok {
+				history[c.ClipID] = c.LineIDs
+			}
+		}
+	}
+	mark(clips1)
+
+	// 第 2 次：删中间一句 → 分组变化
+	sc.Script.Lines = append(sc.Script.Lines[:1], sc.Script.Lines[2:]...)
+	clips2, _, err := GenDraft(sc, sc.Clips)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.Clips = clips2
+	mark(clips2)
+
+	// 第 3 次：再删一句 → 又有一批旧 id 淘汰
+	sc.Script.Lines = sc.Script.Lines[:len(sc.Script.Lines)-1]
+	clips3, _, err := GenDraft(sc, sc.Clips)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.Clips = clips3
+	mark(clips3)
+
+	// 第 4 次：加一句新台词 → 分配新 id
+	sc.Script.Lines = append(sc.Script.Lines, dubbing.ScriptLine{
+		LineID: "l99", SceneID: "s1", RoleID: "narrator", Text: "追加的一句新台词。"})
+	clips4, _, err := GenDraft(sc, sc.Clips)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range clips4 {
+		if old, ok := history[c.ClipID]; ok && joinS(old) != joinS(c.LineIDs) {
+			t.Errorf("clip_id %s 被复用给不同内容（%s → %s）", c.ClipID, joinS(old), joinS(c.LineIDs))
+		}
+	}
+}
+
+// duplicate 出的副本与原 clip 共享 line_ids；重生成只能保留一个身份时，
+// 必须保留有正式素材绑定的原件，而不是恰好排在后面的副本。
+func TestGenDraftDuplicateKeepsFinalBinding(t *testing.T) {
+	sc := newSceneWithDraft(t)
+	orig := &sc.Clips[0]
+	orig.Candidates = append(orig.Candidates, ClipSource{Kind: "video", Path: "/tmp/final.mp4"})
+	orig.Pick = 1
+	orig.Status = "final"
+	orig.T0Ms, orig.T1Ms = 0, orig.DurMs
+	origID, origLines := orig.ClipID, append([]string(nil), orig.LineIDs...)
+	if err := sc.DuplicateClip(origID); err != nil {
+		t.Fatal(err)
+	}
+	dupID := sc.Order[1]
+	clips2, _, err := GenDraft(sc, sc.Clips)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range clips2 {
+		if c.ClipID == dupID {
+			t.Error("重生成保留了副本身份而非原件")
+		}
+		if joinS(c.LineIDs) == joinS(origLines) {
+			if c.ClipID != origID {
+				t.Errorf("原内容应沿用原件 id %s，得到 %s", origID, c.ClipID)
+			}
+			if !c.IsFinal() || c.Source().Path != "/tmp/final.mp4" {
+				t.Error("原件的 final 素材绑定丢失")
+			}
+		}
+	}
+}
+
+// 同一 base_rev 的两次写，只有先到的一次能提交——
+// 场景互斥把"读版本-校验-修改-写盘"收进同一临界区。
+func TestConcurrentEditsSameBaseRev(t *testing.T) {
+	dir := t.TempDir()
+	st := &Studio{}
+	sc := newSceneWithDraft(t)
+	if err := st.saveScene(dir, sc, false); err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := loadScene(dir)
+	lines := sc.Script.Lines
+	var okCnt int
+	var wg sync.WaitGroup
+	for i, l := range lines[:2] {
+		wg.Add(1)
+		go func(i int, lid string) {
+			defer wg.Done()
+			op := fmt.Sprintf(`{"op":"update_line","line_id":%q,"text":"并发改 %d","base_rev":%d}`, lid, i, cur.Revision)
+			res := st.SceneEdit(dir, op)
+			var env struct {
+				OK bool `json:"ok"`
+			}
+			if json.Unmarshal([]byte(res), &env) == nil && env.OK {
+				okCnt++
+			}
+		}(i, l.LineID)
+	}
+	wg.Wait()
+	if okCnt > 1 {
+		t.Errorf("同 base_rev 的两个写都成功了（lost update）")
+	}
+	// 顺序重放同 rev 也必须失败
+	res := st.SceneEdit(dir, fmt.Sprintf(
+		`{"op":"update_line","line_id":%q,"text":"再来一次","base_rev":%d}`, lines[0].LineID, cur.Revision))
+	var env struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal([]byte(res), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.OK {
+		t.Error("过期 base_rev 的写被接受了")
+	}
+}
+
+// 指纹链：改台词正文 → timeline+rendered 双过期；改变声预设 → 只 rendered 过期。
+func TestScriptAndVoiceInvalidateAudio(t *testing.T) {
+	dir := t.TempDir()
+	st := &Studio{}
+	sc := newSceneWithDraft(t)
+	take := filepath.Join(t.TempDir(), "take.wav")
+	wav, _ := base64.StdEncoding.DecodeString(engineTestWAV(t))
+	os.WriteFile(take, wav, 0o644)
+	tl := filepath.Join(t.TempDir(), "timeline.json")
+	os.WriteFile(tl, []byte(`{"version":1,"segments":[]}`), 0o644)
+
+	sc.Audio.Take, sc.Audio.TakeSig = take, fileSig(take)
+	sc.Audio.Timeline = tl
+	sc.Audio.TimelineSig = sc.expectedTimelineSig()
+	sc.Audio.Rendered = filepath.Join(t.TempDir(), "rendered")
+	sc.Audio.RenderedSig = sc.expectedRenderedSig()
+	if tlStale, rdStale := sc.AudioStatus(); tlStale || rdStale {
+		t.Fatal("新鲜产物被误判过期")
+	}
+
+	// 改台词 → timeline 与 rendered 都应过期（rendered 是传递过期）
+	lid := sc.Script.Lines[0].LineID
+	if err := sc.UpdateLine(lid, "改过之后的台词文本", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if tlStale, rdStale := sc.AudioStatus(); !tlStale || !rdStale {
+		t.Errorf("改台词后应 timeline+rendered 双过期，得到 tl=%v rd=%v", tlStale, rdStale)
+	}
+
+	// 新场景：只改变声预设 → rendered 过期、timeline 仍有效
+	sc2 := newSceneWithDraft(t)
+	sc2.Audio.Take, sc2.Audio.TakeSig = take, fileSig(take)
+	sc2.Audio.Timeline = tl
+	sc2.Audio.TimelineSig = sc2.expectedTimelineSig()
+	sc2.Audio.Rendered = filepath.Join(t.TempDir(), "rendered")
+	sc2.Audio.RenderedSig = sc2.expectedRenderedSig()
+	if err := st.saveScene(dir, sc2, false); err != nil {
+		t.Fatal(err)
+	}
+	roleID := sc2.Roles[0].ID
+	res := st.SceneEdit(dir, fmt.Sprintf(`{"op":"set_role_voice","role_id":%q,"preset":"deep"}`, roleID))
+	var env struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal([]byte(res), &env); err != nil || !env.OK {
+		t.Fatalf("set_role_voice: %s", res)
+	}
+	cur, _ := loadScene(dir)
+	if tlStale, rdStale := cur.AudioStatus(); tlStale || !rdStale {
+		t.Errorf("改音色后应只 rendered 过期，得到 tl=%v rd=%v", tlStale, rdStale)
+	}
+}
+
+// SaveScene 整份写回也要过 rev 检查——payload 版本落后即拒绝。
+func TestSaveSceneRejectsStaleRev(t *testing.T) {
+	dir := t.TempDir()
+	st := &Studio{}
+	sc := newSceneWithDraft(t)
+	if err := st.saveScene(dir, sc, false); err != nil {
+		t.Fatal(err)
+	}
+	// 客户端基于 rev N 的副本改了标题；期间磁盘已被别人写到 N+1
+	cur, _ := loadScene(dir)
+	stale := *cur
+	stale.Title = "旧客户端的覆盖"
+	cur.Title = "别人先写入的修改"
+	if err := st.saveScene(dir, cur, false); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := stale.Marshal()
+	res := st.SaveScene(dir, string(payload))
+	var env struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal([]byte(res), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.OK {
+		t.Error("过期整份保存被接受了")
+	}
+	// 最新 rev 的正常保存仍应通过
+	cur2, _ := loadScene(dir)
+	cur2.Title = "新标题"
+	payload2, _ := cur2.Marshal()
+	res2 := st.SaveScene(dir, string(payload2))
+	var env2 struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal([]byte(res2), &env2); err != nil || !env2.OK {
+		t.Fatalf("最新 rev 的保存应通过: %s", res2)
 	}
 }
 
@@ -635,23 +858,26 @@ func TestSetTakeInvalidatesTimeline(t *testing.T) {
 	if cur.Audio.TakeSig == "" {
 		t.Fatal("set_take 没记录指纹")
 	}
-	// 模拟一份基于 take1 的 timeline
+	// 模拟一份基于 take1+当前台本的 timeline 和 rendered
+	// （签名与 Analyze/RenderScene 写入的一致）
 	cur.Audio.Timeline = "/tmp/timeline.json"
-	cur.Audio.TimelineSig = cur.Audio.TakeSig
-	if cur.Audio.TimelineStale() {
-		t.Fatal("同 take 的 timeline 不应过期")
+	cur.Audio.TimelineSig = cur.expectedTimelineSig()
+	cur.Audio.Rendered = "/tmp/rendered"
+	cur.Audio.RenderedSig = cur.expectedRenderedSig()
+	if tlStale, rdStale := cur.AudioStatus(); tlStale || rdStale {
+		t.Fatal("新鲜产物不应判过期")
 	}
 	if err := st.saveScene(dir, cur, false); err != nil {
 		t.Fatal(err)
 	}
-	// 换 take2 → timeline 过期
+	// 换 take2 → timeline 过期，rendered 传递过期（不得再进正式预览）
 	res = st.SceneEdit(dir, fmt.Sprintf(`{"op":"set_take","path":%q}`, take2))
 	if err := json.Unmarshal([]byte(res), &env); err != nil || !env.OK {
 		t.Fatalf("set_take2: %s", res)
 	}
 	cur, _ = loadScene(dir)
-	if !cur.Audio.TimelineStale() {
-		t.Error("换 take 后旧 timeline 应判过期")
+	if tlStale, rdStale := cur.AudioStatus(); !tlStale || !rdStale {
+		t.Errorf("换 take 后 timeline/rendered 应都过期，得到 tl=%v rd=%v", tlStale, rdStale)
 	}
 }
 
@@ -715,8 +941,9 @@ func TestMediaServer(t *testing.T) {
 	f := filepath.Join(dir, "x.wav")
 	os.WriteFile(f, []byte("RIFF"+strings.Repeat("0", 100)), 0o644)
 	m.allow(dir)
-	// allowlist 内的文件 + Range
-	req := httptest.NewRequest("GET", m.base+"?p="+f, nil)
+	url := func(p string) string { return m.base + "?p=" + p + "&k=" + m.key }
+	// allowlist 内的文件 + Range + 正确 token
+	req := httptest.NewRequest("GET", url(f), nil)
 	req.Header.Set("Range", "bytes=0-9")
 	rec := httptest.NewRecorder()
 	m.serve(rec, req)
@@ -726,11 +953,19 @@ func TestMediaServer(t *testing.T) {
 	if rec.Body.Len() != 10 {
 		t.Errorf("Range 应回 10 字节，得到 %d", rec.Body.Len())
 	}
+	// 缺/错 token → 403（本机其他网页猜到路径也读不到）
+	for _, u := range []string{m.base + "?p=" + f, m.base + "?p=" + f + "&k=wrong"} {
+		rec := httptest.NewRecorder()
+		m.serve(rec, httptest.NewRequest("GET", u, nil))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("无/错 token 应 403，得到 %d", rec.Code)
+		}
+	}
 	// 未 allow 的目录 → 403
 	outside := filepath.Join(t.TempDir(), "y.wav")
 	os.WriteFile(outside, []byte("RIFF"), 0o644)
 	rec2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("GET", m.base+"?p="+outside, nil)
+	req2 := httptest.NewRequest("GET", url(outside), nil)
 	m.serve(rec2, req2)
 	if rec2.Code != http.StatusForbidden {
 		t.Errorf("未授权路径应 403，得到 %d", rec2.Code)
@@ -739,9 +974,33 @@ func TestMediaServer(t *testing.T) {
 	txt := filepath.Join(dir, "s.txt")
 	os.WriteFile(txt, []byte("x"), 0o644)
 	rec3 := httptest.NewRecorder()
-	m.serve(rec3, httptest.NewRequest("GET", m.base+"?p="+txt, nil))
+	m.serve(rec3, httptest.NewRequest("GET", url(txt), nil))
 	if rec3.Code != http.StatusForbidden {
 		t.Errorf("非媒体文件应 403，得到 %d", rec3.Code)
+	}
+	// .json 只放行 manifest.json；scene.json 等元数据必须 403
+	manifest := filepath.Join(dir, "manifest.json")
+	os.WriteFile(manifest, []byte(`{"lines":[]}`), 0o644)
+	recM := httptest.NewRecorder()
+	m.serve(recM, httptest.NewRequest("GET", url(manifest), nil))
+	if recM.Code != http.StatusOK {
+		t.Errorf("manifest.json 应放行，得到 %d", recM.Code)
+	}
+	sceneJSON := filepath.Join(dir, "scene.json")
+	os.WriteFile(sceneJSON, []byte(`{}`), 0o644)
+	recJ := httptest.NewRecorder()
+	m.serve(recJ, httptest.NewRequest("GET", url(sceneJSON), nil))
+	if recJ.Code != http.StatusForbidden {
+		t.Errorf("非 manifest 的 .json 应 403，得到 %d", recJ.Code)
+	}
+	// 根目录内指向根外的 symlink 不得逃出 allowlist
+	link := filepath.Join(dir, "link.wav")
+	if err := os.Symlink(outside, link); err == nil {
+		recL := httptest.NewRecorder()
+		m.serve(recL, httptest.NewRequest("GET", url(link), nil))
+		if recL.Code != http.StatusForbidden {
+			t.Errorf("越根 symlink 应 403，得到 %d", recL.Code)
+		}
 	}
 }
 

@@ -54,6 +54,7 @@ type Studio struct {
 }
 
 type sceneState struct {
+	mu   sync.Mutex // 串行化本场景的"读-改-写"（rev 检查与保存必须在同一临界区）
 	undo [][]byte
 	redo [][]byte
 }
@@ -110,6 +111,9 @@ func (s *Studio) saveScene(dir string, sc *Scene, snap bool) error {
 		rev = old.Revision + 1
 	}
 	sc.Revision = rev
+	if old != nil && sc.NextClipSeq < old.NextClipSeq {
+		sc.NextClipSeq = old.NextClipSeq // 分配器单调：undo/回退不回收已发 id
+	}
 	sc.normalize()
 	if err := sc.Validate(); err != nil {
 		return err
@@ -140,10 +144,10 @@ func (s *Studio) decorateScene(sc *Scene) {
 	if sc.Meta == nil {
 		sc.Meta = map[string]any{}
 	}
+	tlStale, rdStale := sc.AudioStatus()
 	sc.Meta["audio_status"] = map[string]any{
-		"timeline_stale": sc.Audio.TimelineStale(),
-		"rendered_stale": sc.Audio.Rendered != "" &&
-			sc.Audio.RenderedSig != fileSig(sc.Audio.Timeline),
+		"timeline_stale": tlStale,
+		"rendered_stale": rdStale,
 	}
 }
 
@@ -240,10 +244,18 @@ func (s *Studio) LoadScene(dir string) string {
 }
 
 // SaveScene 全量写回（编辑操作走 SceneEdit 更细粒度且带 undo）。
+// payload 里的 rev 即客户端的基准版本：落后于磁盘当前版本说明期间
+// 被别人改过，拒绝整份覆盖（rev==0 视为无版本概念的导入，跳过检查）。
 func (s *Studio) SaveScene(dir, payload string) string {
+	st := s.st(dir)
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	sc, err := ParseScene([]byte(payload))
 	if err != nil {
 		return errJSON(err)
+	}
+	if old, _ := loadScene(dir); old != nil && sc.Revision != 0 && sc.Revision < old.Revision {
+		return errf("scene 已被修改（rev %d > %d），请刷新后重试", old.Revision, sc.Revision)
 	}
 	if err := s.saveScene(dir, sc, true); err != nil {
 		return errJSON(err)
@@ -255,6 +267,9 @@ func (s *Studio) SaveScene(dir, payload string) string {
 // GenDraft 从台本重生成 draft clips；已有 final 素材绑定随 line_ids 迁移。
 func (s *Studio) GenDraft(dir string) string {
 	t0 := time.Now()
+	st := s.st(dir)
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	sc, err := loadScene(dir)
 	if err != nil {
 		return errJSON(err)
@@ -292,6 +307,9 @@ func (s *Studio) SceneEdit(dir, opJSON string) (ret string) {
 	if err := json.Unmarshal([]byte(opJSON), &op); err != nil {
 		return errJSON(fmt.Errorf("op JSON: %w", err))
 	}
+	st := s.st(dir)
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	sc, err := loadScene(dir)
 	if err != nil {
 		return errJSON(err)
@@ -408,6 +426,8 @@ func (s *Studio) SceneEdit(dir, opJSON string) (ret string) {
 
 func (s *Studio) Undo(dir string) string {
 	st := s.st(dir)
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	if len(st.undo) == 0 {
 		return errf("没有可撤销的操作")
 	}
@@ -433,6 +453,8 @@ func (s *Studio) Undo(dir string) string {
 
 func (s *Studio) Redo(dir string) string {
 	st := s.st(dir)
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	if len(st.redo) == 0 {
 		return errf("没有可重做的操作")
 	}
@@ -518,20 +540,29 @@ func (s *Studio) Analyze(sceneDir, takePath string) string {
 	if err != nil {
 		return errJSON(err)
 	}
-	sc.Audio.Take = takePath
-	sc.Audio.TakeSig = fileSig(takePath)
-	sc.Audio.Session = filepath.Dir(tl.ASRFile)
-	if sc.Audio.Session == "." {
-		sc.Audio.Session = outBase
-	}
-	sc.Audio.Timeline = filepath.Join(sc.Audio.Session, "timeline.json")
-	sc.Audio.TimelineSig = sc.Audio.TakeSig // 这份对齐基于当前 take
-	if err := s.saveScene(sceneDir, sc, true); err != nil {
+	// ASR 耗时期间可能有编辑进来——把产物合并到最新 scene 上，
+	// 不能拿任务开始时的旧文档整份覆盖。
+	st := s.st(sceneDir)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	fresh, err := loadScene(sceneDir)
+	if err != nil {
 		return errJSON(err)
 	}
-	s.mediaSrv().allow(sc.Audio.Session)
+	fresh.Audio.Take = takePath
+	fresh.Audio.TakeSig = fileSig(takePath)
+	fresh.Audio.Session = filepath.Dir(tl.ASRFile)
+	if fresh.Audio.Session == "." {
+		fresh.Audio.Session = outBase
+	}
+	fresh.Audio.Timeline = filepath.Join(fresh.Audio.Session, "timeline.json")
+	fresh.Audio.TimelineSig = fresh.expectedTimelineSig() // take+台本指纹
+	if err := s.saveScene(sceneDir, fresh, true); err != nil {
+		return errJSON(err)
+	}
+	s.mediaSrv().allow(fresh.Audio.Session)
 	return okJSON(map[string]any{
-		"session": sc.Audio.Session, "timeline": sc.Audio.Timeline,
+		"session": fresh.Audio.Session, "timeline": fresh.Audio.Timeline,
 		"segments": len(tl.Segments), "review_count": tl.ReviewCount,
 		"unmatched": len(tl.UnmatchedLines), "asr": asr != nil,
 		"elapsed_ms": analyzeMs,
@@ -568,9 +599,17 @@ func (s *Studio) RenderScene(sceneDir string) string {
 	if err != nil {
 		return errJSON(err)
 	}
-	sc.Audio.Rendered = outDir
-	sc.Audio.RenderedSig = fileSig(sc.Audio.Timeline) // 这份渲染基于当前 timeline
-	if err := s.saveScene(sceneDir, sc, false); err != nil {
+	// 渲染耗时期间可能改过音色/timeline——合并到最新文档上。
+	st := s.st(sceneDir)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	fresh, err := loadScene(sceneDir)
+	if err != nil {
+		return errJSON(err)
+	}
+	fresh.Audio.Rendered = outDir
+	fresh.Audio.RenderedSig = fresh.expectedRenderedSig() // timeline+音色指纹
+	if err := s.saveScene(sceneDir, fresh, false); err != nil {
 		return errJSON(err)
 	}
 	s.mediaSrv().allow(outDir)
@@ -874,9 +913,11 @@ func (s *Studio) ScanVideos(dir string) string {
 	return okJSON(out)
 }
 
-// MediaBase 返回 localhost 媒体服务基址（前端拼 ?p=<abs path>）。
+// MediaBase 返回 localhost 媒体服务基址和会话令牌
+// （前端拼 ?p=<abs path>&k=<key>）。
 func (s *Studio) MediaBase() string {
-	return okJSON(map[string]string{"base": s.mediaSrv().base})
+	m := s.mediaSrv()
+	return okJSON(map[string]string{"base": m.base, "key": m.key})
 }
 
 func (s *Studio) mediaSrv() *mediaServer {

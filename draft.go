@@ -105,13 +105,30 @@ func GenDraft(scene *Scene, preserve []Clip) ([]Clip, []string, error) {
 	// 指向它们的批注会悬空并可被识别，而不是静默指到别的素材上。
 	used := map[string]bool{}
 	prev := prevMap{}
+	// 同一 line_ids 组合可能有多个旧 clip（比如 duplicate 出的副本）：
+	// 有正式视频绑定的优先，其次非 draft 状态，其余按先出现。
+	better := func(a, b Clip) bool {
+		if a.IsFinal() != b.IsFinal() {
+			return a.IsFinal()
+		}
+		if a.Status != b.Status {
+			return a.Status != "draft"
+		}
+		return false
+	}
 	for _, c := range preserve {
-		prev[strings.Join(c.LineIDs, "|")] = c
+		k := strings.Join(c.LineIDs, "|")
+		if old, ok := prev[k]; !ok || better(c, old) {
+			prev[k] = c
+		}
 		used[c.ClipID] = true
 	}
+	// 新 id 来自 scene 的单调分配器：本次之外被淘汰过的序号也不会复用。
+	scene.ensureClipSeq()
 	allocID := func() string {
-		for i := 1; ; i++ {
-			id := fmt.Sprintf("c%02d", i)
+		for {
+			id := fmt.Sprintf("c%02d", scene.NextClipSeq)
+			scene.NextClipSeq++
 			if !used[id] {
 				used[id] = true
 				return id

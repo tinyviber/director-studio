@@ -15,11 +15,13 @@ export class Player {
   scene: Scene | null = null;
   timeline: Timeline | null = null;      // 对齐后的配音 timeline（取 src 切片）
   mediaBase = "";
+  mediaKey = "";                          // 媒体服务会话令牌（MediaBase 下发）
   playing = false;
   playhead = 0;                           // scene 时间轴 ms
   starts: number[] = [];                  // 每个 ordered clip 的起点
   private raf = 0;
   private lastT = 0;
+  private playGen = 0;                     // 播放请求代次：pause/新 play 使在途 play 失效
   private audioBufs = new Map<string, AudioBuffer | null>(); // wav 路径 → buffer
   private wavInflight = new Map<string, Promise<AudioBuffer | null>>();
   private manifestInflight: Promise<void> | null = null;
@@ -39,17 +41,48 @@ export class Player {
     this.vid.addEventListener("ended", () => this.tick(performance.now()));
   }
 
-  // setScene 换场景文档。preserve=true（编辑/undo 等同场景更新）时保留
-  // 播放头与音频缓存；false（换场景）时全部重置，避免上个场景的对齐数据
-  // 和 rendered 索引污染新场景。
-  setScene(s: Scene | null, preserve = false) {
-    this.stopAudio();
-    const prevHead = preserve ? this.playhead : 0;
-    this.scene = s;
-    if (!preserve) {
-      this.timeline = null;
-      this.invalidateAudio();
+  // mediaURL 拼带会话令牌的媒体地址；mediaBase 为空（无服务/mock）时不可用。
+  mediaURL(path: string): string {
+    return `${this.mediaBase}?p=${encodeURIComponent(path)}&k=${this.mediaKey}`;
+  }
+
+  // schedKey 决定已调度的台词音频是否仍然有效：只含影响播放编排的字段
+  // （编排顺序、clip 源、line beats）——批注/备注/标题变化不该打断配音。
+  private schedKeyFor(s: Scene | null): string {
+    if (!s) return "";
+    const parts: string[] = [];
+    for (const id of s.order) {
+      const c = s.clips.find((x) => x.clip_id === id);
+      if (!c) continue;
+      parts.push(`${id}:${c.candidates?.[c.pick ?? 0]?.kind ?? "draft"}:${c.dur_ms}`);
+      for (const b of c.beats) {
+        if (b.kind === "line") parts.push(`${b.line_id}@${b.at_ms}+${b.dur_ms ?? 0}`);
+      }
     }
+    return parts.join("|");
+  }
+
+  // audioKey 决定解码缓存/manifest 索引是否仍然有效：配音产物的路径
+  // 或指纹变了，缓存内容就不该再被复用。
+  private audioKeyFor(s: Scene | null): string {
+    const a = s?.audio;
+    if (!a) return "";
+    return [a.take, a.take_sig, a.timeline, a.timeline_sig, a.rendered, a.rendered_sig].join("|");
+  }
+
+  // setScene 换场景文档。preserve=true（编辑/undo 等同场景更新）时保留
+  // 播放头；并区分两类更新——只动批注/元数据的更新不打断正在播的音频，
+  // 动了编排或配音产物的更新才重调度并失效缓存。
+  // false（换场景）时全部重置，避免上个场景的对齐数据污染新场景。
+  setScene(s: Scene | null, preserve = false) {
+    const prevHead = preserve ? this.playhead : 0;
+    const schedChanged = this.schedKeyFor(this.scene) !== this.schedKeyFor(s);
+    const audioChanged = this.audioKeyFor(this.scene) !== this.audioKeyFor(s);
+    const rewire = schedChanged || audioChanged;
+    if (!preserve || rewire) this.stopAudio();
+    if (!preserve || audioChanged) this.invalidateAudio();
+    this.scene = s;
+    if (!preserve) this.timeline = null;
     this.starts = [];
     let t = 0;
     if (s) for (const id of s.order) {
@@ -60,6 +93,9 @@ export class Player {
     this.playhead = Math.max(0, Math.min(prevHead, this.total()));
     this.curClipIdx = -1;
     this.actors.reset();
+    // 编排/配音变了但还在播：以当前播放头重建调度——画面不停、
+    // 音频按新编排补回来，而不是画面继续走、声音却没了。
+    if (preserve && rewire && this.playing) void this.scheduleFrom(this.playhead);
   }
 
   // invalidateAudio 在 take/timeline/rendered 变化后调用：丢弃解码缓存与
@@ -105,7 +141,7 @@ export class Player {
       const gen = this.audioGen;
       this.manifestInflight = (async () => {
         try {
-          const r = await fetch(`${this.mediaBase}?p=${encodeURIComponent(dir + "/manifest.json")}`);
+          const r = await fetch(this.mediaURL(dir + "/manifest.json"));
           if (!r.ok || gen !== this.audioGen) return;
           const m = await r.json() as { lines?: { line_id?: string; wav?: string }[] };
           for (const ln of m.lines ?? []) {
@@ -129,7 +165,7 @@ export class Player {
       const gen = this.audioGen;
       p = (async () => {
         try {
-          const r = await fetch(`${this.mediaBase}?p=${encodeURIComponent(path)}`);
+          const r = await fetch(this.mediaURL(path));
           if (!r.ok || !this.actx) return null;
           return await this.actx.decodeAudioData(await r.arrayBuffer());
         } catch { return null; }
@@ -142,10 +178,14 @@ export class Player {
 
   // audioForLine 返回一句台词当前应放的音频窗口：rendered manifest 里选中的
   // wav 优先，其次 timeline 里对应 segment 的 take 切片（源 wav + [start,end]）。
+  // 过期产物不进预览：stale 由服务端按指纹链算出——只显示徽标不拦播放
+  // 等于拿旧音轨冒充新版本，反而比静音更有害。
   async audioForLine(lineID: string): Promise<LineAudio | null> {
     if (!this.scene || !this.actx) return null;
+    const stale = (this.scene.meta?.audio_status ?? {}) as
+      { timeline_stale?: boolean; rendered_stale?: boolean };
     // 1) rendered lines wav（manifest 映射）
-    if (this.scene.audio?.rendered && this.mediaBase) {
+    if (this.scene.audio?.rendered && this.mediaBase && !stale.rendered_stale) {
       await this.loadManifest();
       const p = this.lineWav.get(lineID);
       if (p) {
@@ -154,7 +194,7 @@ export class Player {
       }
     }
     // 2) take 切片（整条 take wav + 段内 [start,end] 窗口）
-    if (this.scene.audio?.take && this.timeline) {
+    if (this.scene.audio?.take && this.timeline && this.mediaBase && !stale.timeline_stale) {
       const seg = this.timeline.segments.find((s) => s.line_id === lineID && s.selected);
       if (seg) {
         const buf = await this.decodeWav(this.scene.audio.take);
@@ -178,7 +218,9 @@ export class Player {
     const src = this.actx.createBufferSource();
     src.buffer = au.buf;
     src.connect(this.actx.destination);
-    const dur = au.offMs > 0
+    // 用 durMs 判断（不是 offMs）——take 切片起点为 0ms 时也应只放该句窗口，
+    // 否则会把整条 take 从头播完。
+    const dur = au.durMs > 0
       ? Math.min(au.durMs / 1000 + 0.2, au.buf.duration - au.offMs / 1000)
       : undefined;
     src.start(0, au.offMs / 1000, dur);
@@ -189,8 +231,12 @@ export class Player {
     if (!this.scene || this.playing) return;
     this.ensureAudio();
     this.playing = true;
+    const gen = ++this.playGen;
     this.lastT = performance.now(); // 兜底：等待期的 stray tick 不至于 dt 爆掉
     await this.scheduleFrom(this.playhead);
+    // 等待期间被 pause/seek/新一次 play 取代时，不得再启动 RAF——
+    // 否则两个 tick 循环会同时推进播放头。
+    if (gen !== this.playGen || !this.playing) return;
     // 装载与调度耗时不计入播放时间，否则首帧会跳过等待时长。
     this.lastT = performance.now();
     const loop = (t: number) => {
@@ -202,6 +248,7 @@ export class Player {
   }
 
   pause() {
+    this.playGen++; // 使在途的 play() 落地即失效
     this.playing = false;
     cancelAnimationFrame(this.raf);
     this.stopAudio();
@@ -241,11 +288,14 @@ export class Player {
     const aus = await Promise.all(jobs.map((j) => this.audioForLine(j.lineID)));
     if (gen !== this.schedGen || !this.actx) return; // 等待期间被 pause/seek 打断
     const base = this.actx.currentTime + 0.05;
+    // 解码期间播放头可能已前进（播放中重调度）——以当前位置校准，
+    // 否则音频会整体晚出这段装载耗时。
+    const now = this.playhead;
     jobs.forEach((j, k) => {
       const au = aus[k];
       if (!au || !this.actx) return;
-      // seek 落到句子中间时，从切片内对应偏移继续放。
-      const lead = Math.max(0, ms - j.abs);
+      // seek/重调度落到句子中间时，从切片内对应偏移继续放。
+      const lead = Math.max(0, now - j.abs);
       const offS = au.offMs / 1000 + lead / 1000;
       const avail = au.buf.duration - offS;
       const want = Math.min(j.dur > 0 ? (j.dur - lead) / 1000 + 0.3 : avail, avail);
@@ -253,7 +303,7 @@ export class Player {
       const src = this.actx.createBufferSource();
       src.buffer = au.buf;
       src.connect(this.actx.destination);
-      src.start(base + Math.max(0, j.abs - ms) / 1000, offS, want);
+      src.start(base + Math.max(0, j.abs - now) / 1000, offS, want);
       this.sources.push(src);
     });
   }
@@ -273,7 +323,7 @@ export class Player {
   private videoURL(clip: Clip): string | null {
     const src = clip.candidates?.[clip.pick ?? 0];
     if (src?.kind === "video" && src.path && this.mediaBase) {
-      return `${this.mediaBase}?p=${encodeURIComponent(src.path)}`;
+      return this.mediaURL(src.path);
     }
     return null;
   }

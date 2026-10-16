@@ -97,7 +97,7 @@ export interface Bridge {
   openPath(p: string): Promise<unknown>;
   confirm(t: string, c: string): Promise<{ ok: boolean }>;
   scanVideos(d: string): Promise<string[]>;
-  mediaBase(): Promise<{ base: string }>;
+  mediaBase(): Promise<{ base: string; key: string }>;
 }
 
 // 真实桥：调生成的绑定。方法名与 Go 绑定一致。
@@ -245,7 +245,14 @@ const mockOps: Record<string, (s: Scene, op: any) => void> = {
   feedback_status(s, op) { s.feedback!.find((f) => f.id === op.id)!.status = op.status; },
   set_role_voice(s, op) { s.roles.find((r) => r.id === op.role_id)!.voice = { backend: "dsp", preset: op.preset }; },
   note(s, op) { s.clips.find((x) => x.clip_id === op.clip_id)!.note = op.text; },
-  set_take(s, op) { s.audio = { ...(s.audio ?? {}), take: op.path }; },
+  set_take(s, op) {
+    s.audio = { ...(s.audio ?? {}), take: op.path, take_sig: `mock-${op.path}` };
+    // 与真实服务端一致：换 take 后旧 timeline/rendered 判过期，
+    // 播放器读 audio_status 决定能不能放这些产物。
+    if (s.audio.timeline || s.audio.rendered) {
+      s.meta = { ...(s.meta ?? {}), audio_status: { timeline_stale: !!s.audio.timeline, rendered_stale: !!s.audio.rendered } };
+    }
+  },
 };
 
 const mockTimeline: Timeline = {
@@ -291,7 +298,7 @@ const mock: Bridge = {
       openPath: async () => ({}),
       confirm: async () => ({ ok: true }),
       scanVideos: async () => ["/mock/final/c01.mp4", "/mock/final/c02.mp4"],
-      mediaBase: async () => ({ base: "" }),
+      mediaBase: async () => ({ base: "", key: "" }),
     };
 
 export const bridge: Bridge = isMyGo() ? real : mock;

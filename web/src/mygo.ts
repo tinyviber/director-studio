@@ -33,7 +33,10 @@ export const Studio = {
   loadTimeline(path: string): Promise<string> {
     return call("Studio.LoadTimeline", path);
   },
-  /** MediaBase 返回 localhost 媒体服务基址（前端拼 ?p=<abs path>）。 */
+  /**
+   * MediaBase 返回 localhost 媒体服务基址和会话令牌
+   * （前端拼 ?p=<abs path>&k=<key>）。
+   */
   mediaBase(): Promise<string> {
     return call("Studio.MediaBase");
   },
@@ -84,7 +87,11 @@ export const Studio = {
   saveRecording(workspace: string, b64wav: string, name: string): Promise<string> {
     return call("Studio.SaveRecording", workspace, b64wav, name);
   },
-  /** SaveScene 全量写回（编辑操作走 SceneEdit 更细粒度且带 undo）。 */
+  /**
+   * SaveScene 全量写回（编辑操作走 SceneEdit 更细粒度且带 undo）。
+   * payload 里的 rev 即客户端的基准版本：落后于磁盘当前版本说明期间
+   * 被别人改过，拒绝整份覆盖（rev==0 视为无版本概念的导入，跳过检查）。
+   */
   saveScene(dir: string, payload: string): Promise<string> {
     return call("Studio.SaveScene", dir, payload);
   },

@@ -57,8 +57,9 @@ function applyScene(s: Scene, preserve: boolean) {
 
 async function loadScene(dir: string) {
   state.sceneDir = dir;
-  const mb = await bridge.mediaBase().catch(() => ({ base: "" }));
+  const mb = await bridge.mediaBase().catch(() => ({ base: "", key: "" }));
   player.mediaBase = mb.base;
+  player.mediaKey = mb.key ?? "";
   const s = await bridge.loadScene(dir);
   if (s.audio?.timeline) {
     state.timeline = await bridge.loadTimeline(s.audio.timeline).catch(() => null);
@@ -303,7 +304,7 @@ async function renderVoice() {
     d.innerHTML = `<svg viewBox="0 0 16 16" width="12" height="12" style="flex:none;color:var(--muted)"><rect x="5.5" y="2" width="5" height="8" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 8a5 5 0 0 0 10 0M8 13v2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><span class="nm">${esc(s.audio.take.split("/").pop() ?? "")}${staleBadges}</span>`;
     const play = document.createElement("button"); play.textContent = "试听";
     play.onclick = () => {
-      if (player.mediaBase) void new Audio(`${player.mediaBase}?p=${encodeURIComponent(s.audio!.take!)}`).play();
+      if (player.mediaBase) void new Audio(player.mediaURL(s.audio!.take!)).play();
     };
     const morph = document.createElement("button"); morph.textContent = "变声试听";
     morph.onclick = async () => {
@@ -339,7 +340,7 @@ async function renderVoice() {
       const mk = (t: string, fn: () => void) => { const b = document.createElement("button"); b.textContent = t; b.onclick = fn; row.appendChild(b); };
       mk("试听", () => {
         if (s.audio?.take && player.mediaBase) {
-          const a = new Audio(`${player.mediaBase}?p=${encodeURIComponent(s.audio.take)}`);
+          const a = new Audio(player.mediaURL(s.audio.take));
           a.currentTime = seg.start_ms / 1000;
           void a.play(); setTimeout(() => a.pause(), seg.end_ms - seg.start_ms + 200);
         }
