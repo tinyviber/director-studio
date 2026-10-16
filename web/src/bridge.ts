@@ -31,6 +31,9 @@ export interface AudioState {
   take?: string; take_sig?: string; session?: string;
   timeline?: string; timeline_sig?: string;
   rendered?: string; rendered_sig?: string;
+  // rendered_status：dubbing.Render 的结果态——指纹一致不代表产物完整，
+  // partial/blocked_review/failed 不进正式预览。
+  rendered_status?: string;
 }
 export interface Scene {
   version: number; rev?: number; scene_id: string; title: string;

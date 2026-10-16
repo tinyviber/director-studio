@@ -375,18 +375,20 @@ func TestScriptAndVoiceInvalidateAudio(t *testing.T) {
 	}
 }
 
-// commitAudioArtifacts：耗时任务完成后合并产物——期间进来的编辑不丢，
-// 且产物指纹按任务开始时的输入算，台本中途被改 → 判过期而非误标有效。
+// commitAudioArtifacts：耗时任务完成后合并产物——期间进来的编辑不丢；
+// 产物指纹按任务开始时的输入算，输入中途被改 → 任务已被取代，
+// 不提升（产物留在 job 目录作历史），而不是覆盖当前生效的引用。
 func TestCommitAudioArtifactsRace(t *testing.T) {
 	dir := t.TempDir()
 	st := &Studio{}
 	sc := newSceneWithDraft(t)
-	if err := st.saveScene(dir, sc, false); err != nil {
-		t.Fatal(err)
-	}
 	take := filepath.Join(t.TempDir(), "take.wav")
 	wav, _ := base64.StdEncoding.DecodeString(engineTestWAV(t))
 	os.WriteFile(take, wav, 0o644)
+	sc.Audio.Take, sc.Audio.TakeSig = take, fileSig(take)
+	if err := st.saveScene(dir, sc, false); err != nil {
+		t.Fatal(err)
+	}
 
 	// 任务开始：按当时 take+台本算产物指纹
 	takeSig := fileSig(take)
@@ -403,14 +405,18 @@ func TestCommitAudioArtifactsRace(t *testing.T) {
 		t.Fatalf("mid-task edit: %s", res)
 	}
 
-	// 任务结束：合并产物（指纹是任务开始时算的）
-	err := st.commitAudioArtifacts(dir, true, func(fresh *Scene) {
-		fresh.Audio.Take, fresh.Audio.TakeSig = take, takeSig
-		fresh.Audio.Timeline = filepath.Join(dir, "timeline.json")
-		fresh.Audio.TimelineSig = tlSig
-	})
+	// 任务结束：提交产物（指纹是任务开始时算的）→ 输入已变，不提升
+	promoted, err := st.commitAudioArtifacts(dir, true, tlSig,
+		(*Scene).expectedTimelineSig, func(fresh *Scene) {
+			fresh.Audio.Take, fresh.Audio.TakeSig = take, takeSig
+			fresh.Audio.Timeline = filepath.Join(dir, "timeline.json")
+			fresh.Audio.TimelineSig = tlSig
+		})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if promoted {
+		t.Error("输入已变更的任务结果不应被提升为当前版本")
 	}
 
 	cur, err := loadScene(dir)
@@ -421,9 +427,73 @@ func TestCommitAudioArtifactsRace(t *testing.T) {
 	if cur.Script.Lines[0].Text != "改过的台词" {
 		t.Error("任务期间的台本编辑被整份覆盖了")
 	}
-	// 产物基于旧台本 → 判过期，不能误标有效
-	if tlStale, _ := cur.AudioStatus(); !tlStale {
-		t.Error("台本在任务期间变更，产物应判过期")
+	// 被取代的任务不写指针——Timeline 保持原状（空），而不是挂上旧产物
+	if cur.Audio.Timeline != "" {
+		t.Errorf("被取代任务的 Timeline 不应覆盖当前引用，得到 %q", cur.Audio.Timeline)
+	}
+}
+
+// A 启动 → 输入改变 → B 启动并完成 → A 才完成：最终生效产物必须仍是 B 的。
+func TestSupersededJobDoesNotOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	st := &Studio{}
+	sc := newSceneWithDraft(t)
+	take := filepath.Join(t.TempDir(), "take.wav")
+	wav, _ := base64.StdEncoding.DecodeString(engineTestWAV(t))
+	os.WriteFile(take, wav, 0o644)
+	sc.Audio.Take, sc.Audio.TakeSig = take, fileSig(take)
+	if err := st.saveScene(dir, sc, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// 任务 A 基于初始台本启动
+	takeSig := fileSig(take)
+	tlSigA := audioSig(takeSig, sc.scriptSig())
+
+	// 台本变更后任务 B 启动
+	l0 := sc.Script.Lines[0]
+	res := st.SceneEdit(dir, fmt.Sprintf(
+		`{"op":"update_line","line_id":%q,"text":"B 时代的台词"}`, l0.LineID))
+	var env struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal([]byte(res), &env); err != nil || !env.OK {
+		t.Fatalf("edit: %s", res)
+	}
+	cur, _ := loadScene(dir)
+	tlSigB := audioSig(takeSig, cur.scriptSig())
+
+	// B 先完成：提升为当前版本
+	tlB := filepath.Join(dir, "job-B", "timeline.json")
+	promoted, err := st.commitAudioArtifacts(dir, true, tlSigB,
+		(*Scene).expectedTimelineSig, func(fresh *Scene) {
+			fresh.Audio.Take, fresh.Audio.TakeSig = take, takeSig
+			fresh.Audio.Session = filepath.Dir(tlB)
+			fresh.Audio.Timeline, fresh.Audio.TimelineSig = tlB, tlSigB
+		})
+	if err != nil || !promoted {
+		t.Fatalf("B 应被提升: promoted=%v err=%v", promoted, err)
+	}
+
+	// A 后完成：不得覆盖 B
+	tlA := filepath.Join(dir, "job-A", "timeline.json")
+	promoted, err = st.commitAudioArtifacts(dir, true, tlSigA,
+		(*Scene).expectedTimelineSig, func(fresh *Scene) {
+			fresh.Audio.Session = filepath.Dir(tlA)
+			fresh.Audio.Timeline, fresh.Audio.TimelineSig = tlA, tlSigA
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted {
+		t.Error("旧任务 A 不应覆盖新任务 B 的结果")
+	}
+	cur, _ = loadScene(dir)
+	if cur.Audio.Timeline != tlB || cur.Audio.TimelineSig != tlSigB {
+		t.Error("生效的 timeline 被旧任务覆盖")
+	}
+	if tlStale, _ := cur.AudioStatus(); tlStale {
+		t.Error("B 的产物本应仍然有效")
 	}
 }
 

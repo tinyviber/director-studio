@@ -294,13 +294,20 @@ async function renderVoice() {
   $("take-list").innerHTML = "";
   if (!s) return;
   // takes: audio.take + rec 目录列不出（没 ls API）→ 显示当前 take + 提供"选文件"
-  const audioStatus = (s.meta?.audio_status ?? {}) as { timeline_stale?: boolean; rendered_stale?: boolean };
+  const audioStatus = (s.meta?.audio_status ?? {}) as
+    { timeline_stale?: boolean; rendered_stale?: boolean };
   if (s.audio?.take) {
     const d = document.createElement("div");
     d.className = "take";
+    // rendered_status：指纹一致不代表产物完整——partial/blocked_review/
+    // failed 的 rendered 不进正式预览，这里必须显式标出来。
+    const rs = s.audio.rendered_status ?? "";
+    const rsBadge = s.audio.rendered && rs !== "" && rs !== "complete"
+      ? ` <span class="badge err">渲染${rs === "failed" ? "失败" : rs === "partial" ? "不完整" : "待审核阻塞"}——不进预览</span>` : "";
     const staleBadges =
       (audioStatus.timeline_stale ? ` <span class="badge err">对齐已过期——换了录音，需重新 ASR</span>` : "") +
-      (audioStatus.rendered_stale ? ` <span class="badge err">渲染已过期——需重新渲染配音</span>` : "");
+      (audioStatus.rendered_stale ? ` <span class="badge err">渲染已过期——需重新渲染配音</span>` : "") +
+      rsBadge;
     d.innerHTML = `<svg viewBox="0 0 16 16" width="12" height="12" style="flex:none;color:var(--muted)"><rect x="5.5" y="2" width="5" height="8" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 8a5 5 0 0 0 10 0M8 13v2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><span class="nm">${esc(s.audio.take.split("/").pop() ?? "")}${staleBadges}</span>`;
     const play = document.createElement("button"); play.textContent = "试听";
     play.onclick = () => {
@@ -422,11 +429,17 @@ async function wireVoice() {
     setSave("ASR 对齐中…（无 GPU，约几秒-几十秒）");
     try {
       const r = await bridge.analyze(state.sceneDir, state.scene.audio.take) as any;
-      state.timeline = await bridge.loadTimeline(r.timeline);
+      if (r.promoted) {
+        state.timeline = await bridge.loadTimeline(r.timeline);
+      } else {
+        // 任务期间输入变了（改台本/换 take/另一任务先完成）——
+        // 结果留作历史记录，不采用也不覆盖当前生效的对齐。
+        toast("对齐结果已过期（任务期间输入变更），未采用");
+      }
       // 服务端已写好 take/timeline 指纹——以落盘的 scene 为准刷新 UI。
       applyScene(await bridge.loadScene(state.sceneDir), true);
       player.timeline = state.timeline;
-      toast(`对齐完成：${r.segments} 段，待审 ${r.review_count}`);
+      if (r.promoted) toast(`对齐完成：${r.segments} 段，待审 ${r.review_count}`);
     } catch (e) { toast("ASR 失败: " + e); }
     setSave("");
     refreshAll();
@@ -439,7 +452,11 @@ async function wireVoice() {
       // rendered 目录可能复用路径、内容已变——丢缓存重新读 manifest。
       player.invalidateAudio();
       applyScene(await bridge.loadScene(state.sceneDir), true);
-      toast(`渲染完成：${r.lines} 条 · ${r.status}`);
+      if (!r.promoted) {
+        toast("渲染结果已过期（任务期间输入变更），未采用");
+      } else {
+        toast(`渲染完成：${r.lines} 条 · ${r.status}`);
+      }
     } catch (e) { toast("渲染失败: " + e); }
     setSave("");
     renderVoice();

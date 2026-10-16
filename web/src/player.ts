@@ -70,6 +70,7 @@ export class Player {
     const st = (s?.meta?.audio_status ?? {}) as { timeline_stale?: boolean; rendered_stale?: boolean };
     if (!a) return st.timeline_stale || st.rendered_stale ? "stale" : "";
     return [a.take, a.take_sig, a.timeline, a.timeline_sig, a.rendered, a.rendered_sig,
+      a.rendered_status ?? "",
       String(!!st.timeline_stale), String(!!st.rendered_stale)].join("|");
   }
 
@@ -187,8 +188,12 @@ export class Player {
     if (!this.scene || !this.actx) return null;
     const stale = (this.scene.meta?.audio_status ?? {}) as
       { timeline_stale?: boolean; rendered_stale?: boolean };
-    // 1) rendered lines wav（manifest 映射）
-    if (this.scene.audio?.rendered && this.mediaBase && !stale.rendered_stale) {
+    // 1) rendered lines wav（manifest 映射）。指纹一致只代表输入没过期，
+    // 不代表产物完整——partial/blocked_review/failed 的 rendered 缺台词，
+    // 不能当成正式预览音源（旧数据无状态记录，按可用处理）。
+    const rs = this.scene.audio?.rendered_status ?? "";
+    if (this.scene.audio?.rendered && this.mediaBase && !stale.rendered_stale &&
+      (rs === "" || rs === "complete")) {
       await this.loadManifest();
       const p = this.lineWav.get(lineID);
       if (p) {

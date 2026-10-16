@@ -117,6 +117,17 @@ type AudioState struct {
 	TimelineSig string `json:"timeline_sig,omitempty"` // timeline 基于的 take 指纹
 	Rendered    string `json:"rendered,omitempty"`     // rendered/ 目录（manifest.json 在内）
 	RenderedSig string `json:"rendered_sig,omitempty"` // rendered 基于的 timeline 指纹
+	// RenderedStatus 持久化 dubbing.Render 的结果状态（complete|partial|
+	// blocked_review|failed）。指纹一致只代表"输入没过期"，不代表产物
+	// 完整——部分台词缺失的产物不能被当成完整版本进正式预览。
+	RenderedStatus string `json:"rendered_status,omitempty"`
+}
+
+// renderedUsable：rendered 产物能否进正式预览。complete 或没有状态
+// 记录的旧数据可用；partial/blocked_review/failed 说明有台词缺失
+// 或渲染失败，只能算中间产物，由配音面板提示后重渲。
+func (a *AudioState) renderedUsable() bool {
+	return a.Rendered != "" && (a.RenderedStatus == "" || a.RenderedStatus == "complete")
 }
 
 // audioSig 把多个输入指纹合成一个短指纹（顺序敏感）。
