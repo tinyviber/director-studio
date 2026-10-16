@@ -1,0 +1,13 @@
+# 构建产物
+build/
+dist/
+.mygo/
+studio
+
+# 依赖
+node_modules/
+
+# 系统/工具
+.DS_Store
+*.log
+.playwright-mcp/

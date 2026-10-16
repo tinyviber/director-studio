@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "audio": "/Users/wj/Documents/repos/director-studio/examples/animatic-demo/workbench/audio/rec/take-demo.wav",
+  "audio_sha256": "bfb639f177234fcd380ca5af4eef90e4b9bd5cfb1f59ffb5362600293809bf6c",
+  "sample_rate": 48000,
+  "duration_ms": 12000,
+  "segments": [
+    {
+      "segment_id": "seg-0001",
+      "asr_segment_id": "seg-0001",
+      "line_id": "l01",
+      "role_id": "narrator",
+      "script_text": "大家好，我们开始吧",
+      "asr_raw": "大家好我们开始吧",
+      "spoken_text": "大家好我们开始吧",
+      "start_ms": 500,
+      "end_ms": 2500,
+      "match_status": "exact",
+      "similarity": 1,
+      "selected": true,
+      "boundary": "measured"
+    },
+    {
+      "segment_id": "seg-0002",
+      "asr_segment_id": "seg-0002",
+      "asr_raw": "广告时间到",
+      "spoken_text": "广告时间到",
+      "start_ms": 3000,
+      "end_ms": 4000,
+      "match_status": "unmatched",
+      "similarity": 0,
+      "review_required": true,
+      "review_reasons": [
+        "unmatched_audio"
+      ],
+      "selected": false,
+      "boundary": "measured"
+    },
+    {
+      "segment_id": "seg-0003",
+      "asr_segment_id": "seg-0003",
+      "line_id": "l02",
+      "role_id": "character-a",
+      "script_text": "等一下",
+      "asr_raw": "等下啊",
+      "spoken_text": "等下啊",
+      "start_ms": 5000,
+      "end_ms": 6500,
+      "match_status": "modified",
+      "similarity": 0.333,
+      "review_required": true,
+      "review_reasons": [
+        "low_similarity"
+      ],
+      "selected": true,
+      "boundary": "measured"
+    },
+    {
+      "segment_id": "seg-0004",
+      "asr_segment_id": "seg-0004",
+      "line_id": "l03",
+      "role_id": "character-a",
+      "script_text": "马上就好",
+      "asr_raw": "马上就",
+      "spoken_text": "马上就",
+      "start_ms": 7500,
+      "end_ms": 9000,
+      "match_status": "repeated",
+      "similarity": 0.857,
+      "take_index": 1,
+      "selected": false,
+      "boundary": "measured"
+    },
+    {
+      "segment_id": "seg-0005",
+      "asr_segment_id": "seg-0005",
+      "line_id": "l03",
+      "role_id": "character-a",
+      "script_text": "马上就好",
+      "asr_raw": "马上就好",
+      "spoken_text": "马上就好",
+      "start_ms": 9500,
+      "end_ms": 11500,
+      "match_status": "repeated",
+      "similarity": 1,
+      "take_index": 2,
+      "selected": true,
+      "boundary": "measured"
+    }
+  ],
+  "unmatched_lines": [
+    {
+      "line_id": "l04",
+      "scene_id": "s1",
+      "role_id": "narrator",
+      "text": "我们下午再练",
+      "reason": "no_audio"
+    }
+  ],
+  "review_count": 3
+}

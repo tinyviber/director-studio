@@ -1,0 +1,26 @@
+[
+  {
+    "end_ms": 2500,
+    "line_id": "l01",
+    "role_id": "narrator",
+    "segment_id": "seg-0001",
+    "start_ms": 480,
+    "text": "大家好我们开始吧"
+  },
+  {
+    "end_ms": 6500,
+    "line_id": "l02",
+    "role_id": "character-a",
+    "segment_id": "seg-0003",
+    "start_ms": 4980,
+    "text": "等下啊"
+  },
+  {
+    "end_ms": 11500,
+    "line_id": "l03",
+    "role_id": "character-a",
+    "segment_id": "seg-0005",
+    "start_ms": 9480,
+    "text": "马上就好"
+  }
+]

@@ -1,0 +1,186 @@
+/*
+ * tokens.css — design tokens distilled from Magpie's UI
+ * (github.com/yetone/magpie, internal/gui/assets/app.css).
+ *
+ * Values marked [M] are copied verbatim from Magpie source.
+ * Values marked [A] are adapted/derived for cross-project reuse.
+ *
+ * Theme resolution:
+ *   - default: follows prefers-color-scheme
+ *   - override: <html data-theme="light|dark">
+ *   - optional colorblind-safe chart palette: <html data-colorblind="1">
+ */
+
+:root {
+  /* ---- surfaces -------------------------------------------------------
+   * One quiet surface. Elevation is expressed by a small fixed ramp,
+   * not by shadows. --bg < --card in lightness; --card-2 sits between
+   * them and means "recessed inside a card" (expanded row, code well).
+   */
+  --bg: #f4f4f6;            /* [M] page ground */
+  --card: #ffffff;          /* [M] raised surface: lists, cards, inputs */
+  --card-2: #f9f9fb;        /* [M] recessed: expanded detail, code well */
+  --pill: #f1f1f4;          /* [M] quiet control fill (popup buttons, seg track) */
+  --pill-hover: #e9e9ee;    /* [M] pill under the pointer */
+  --seg-track: #e6e6eb;     /* [M] header segmented track (a shade deeper than pill) */
+  --seg-thumb: var(--card); /* [M] selected thumb */
+
+  /* ---- lines ----------------------------------------------------------
+   * Two weights only. --line bounds a surface; --line-2 divides inside it
+   * and is visibly lighter. Never invent a third.
+   */
+  --line: #e3e3e8;          /* [M] outer 1px border */
+  --line-2: #ececf0;        /* [M] inner hairline separators */
+
+  /* ---- text ramp ------------------------------------------------------
+   * Four stops, all graphite. Hierarchy comes from this ramp plus weight,
+   * almost never from color.
+   */
+  --fg: #1c1c21;            /* [M] primary ink */
+  --fg-2: #4b4b53;          /* [M] secondary ink (values, row icons, dimmed text) */
+  --muted: #85858d;         /* [M] captions, placeholders-strong, quiet controls */
+  --faint: #b9b9c2;         /* [M] placeholders, chevrons, disabled */
+  --ctl-fg: #63636b;        /* [M] quiet control text; >= 4.5:1 on every surface */
+
+  /* ---- accent ---------------------------------------------------------
+   * Exactly one. Used for: primary buttons, focus rings, selection,
+   * links, "current" markers. Never for decoration or large fills.
+   */
+  --accent: #4f46e5;        /* [M] indigo */
+  --accent-soft: #eeedfd;   /* [M] accent tint surface */
+  --accent-fg: #ffffff;     /* [M] text on accent */
+  --sel: #ecebfb;           /* [M] selected option background */
+
+  /* ---- semantics ------------------------------------------------------
+   * Each = firm ink + matching soft surface. Use the pair together;
+   * never the firm color as a background.
+   */
+  --green: #189a58; --green-soft: #e4f6ec;   /* [M] ok, live, savings */
+  --red: #d64545;   --red-soft: #fbe9e9;     /* [M] errors, destructive */
+  --amber: #b45309; --amber-soft: #fbf0df;   /* [M] warnings, pending */
+
+  /* ---- floating layers --------------------------------------------------
+   * Chrome at rest casts no shadow. Anything that floats above the page
+   * (popover, menu, dialog, dragged row, tooltip) uses --shadow, which
+   * ends in a 0.5px ring so the layer still reads against a same-colored
+   * surface.
+   */
+  --pop-bg: rgba(255, 255, 255, .94);        /* [M] translucent popover fill */
+  --pop-blur: blur(24px);                    /* [M] backdrop for .pop */
+  --scrim: rgba(0, 0, 0, .28);               /* [M] modal scrim */
+  --scrim-blur: blur(8px) saturate(1.1);     /* [M] */
+  --shadow: 0 16px 44px rgba(20, 22, 30, .16), 0 2px 8px rgba(20, 22, 30, .06), 0 0 0 .5px rgba(20, 22, 30, .1); /* [M] */
+  --seg-edge: 0 1px 2px rgba(0, 0, 0, .14), 0 0 0 .5px rgba(0, 0, 0, .08);     /* [M] floating thumb edge */
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); /* [M] input focus halo */
+
+  /* ---- type -------------------------------------------------------------
+   * System stack, incl. explicit Chinese UI faces (Magpie does this for
+   * Windows; kept for all platforms so zh text doesn't fall back).
+   */
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; /* [M]+[A] */
+  --code: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "Microsoft YaHei UI", monospace; /* [M]+[A] */
+
+  --fs-micro: 10.5px;  /* [M] uppercase micro-labels, group headers */
+  --fs-sub: 11.5px;    /* [M] secondary line under a name, captions */
+  --fs-ctl: 12.5px;    /* [M] control text: buttons, inputs, menu items */
+  --fs-body: 13px;     /* [M] base */
+  --fs-title: 13.5px;  /* [M] page/section title weight 600-650 */
+  --fs-figure: 20px;   /* [M] KPI figure; 28px for hero stats */
+  --fs-code: 11.5px;   /* [M] */
+
+  /* ---- radius ------------------------------------------------------------ */
+  --r-xs: 4px;    /* [M] checkbox, tiny badge */
+  --r-sm: 6px;    /* [M] menu items, small fields, seg options */
+  --r-md: 7px;    /* [M] buttons, inputs, nav rows */
+  --r-lg: 10px;   /* [A] nested card inside a card */
+  --r-card: 12px; /* [M] list/card */
+  --r-xl: 14px;   /* [M] hero cards, dialogs */
+  --r-pill: 999px;/* [M] chips, small action pills, switches */
+
+  /* ---- spacing -------------------------------------------------------------
+   * [A] Magpie has no declared scale; these are the values its CSS
+   * actually repeats. Stay inside the scale — don't interpolate.
+   */
+  --s-1: 4px;   /* chips gap, inline icon gaps */
+  --s-2: 8px;   /* control padding step, toolbar gaps */
+  --s-3: 12px;  /* card padding, grid gaps */
+  --s-4: 16px;  /* page padding, section internal gaps */
+  --s-5: 24px;  /* between major sections */
+  --content-max: 1200px; /* [M] pages center at 50% - 600px */
+
+  /* ---- motion ---------------------------------------------------------------
+   * Personality = "fast to respond, long soft settle, no bounce".
+   * Micro feedback (hover, color) uses --t-fast; state changes --t-med;
+   * layout reveals use --ease-spring up to ~.42s.
+   */
+  --ease: cubic-bezier(.2, .8, .2, 1);          /* [M] default */
+  --ease-spring: cubic-bezier(.22, 1, .36, 1);  /* [M] reveals, chevrons, slides */
+  --t-fast: .12s;   /* [M] hover paint */
+  --t-med: .18s;    /* [M] color/state transitions */
+  --t-slow: .32s;   /* [A] upper bound for transforms */
+
+  /* ---- chart series ------------------------------------------------------
+   * [M] qualitative palette; adjacent series differ in hue AND lightness.
+   */
+  --c1: #4f46e5; --c2: #0ea5e9; --c3: #10b981; --c4: #f59e0b;
+  --c5: #ec4899; --c6: #8b5cf6; --c7: #64748b;
+}
+
+/* ---- dark -------------------------------------------------------------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1a1a1e; --card: #232327; --card-2: #1f1f23;
+    --pill: #2d2d33; --pill-hover: #36363d;
+    --seg-track: rgba(255, 255, 255, .035); --seg-thumb: rgba(255, 255, 255, .15);
+    --seg-edge: inset 0 .5px 0 rgba(255, 255, 255, .08), 0 1px 2px rgba(0, 0, 0, .3);
+    --line: #333339; --line-2: #2c2c32;
+    --fg: #ededf1; --fg-2: #b9b9c1; --muted: #8b8b94; --faint: #56565f; --ctl-fg: #a1a1aa;
+    --accent: #a5b4fc; --accent-soft: #2b2c47; --accent-fg: #14142a; --sel: #33345a;
+    --green: #6fd99b; --green-soft: #1e3a2b;
+    --red: #f28b82;   --red-soft: #45272a;
+    --amber: #f2b544; --amber-soft: #3f3220;
+    --pop-bg: rgba(38, 38, 43, .96);
+    --shadow: 0 16px 44px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .3), 0 0 0 .5px rgba(255, 255, 255, .1);
+    --focus-ring: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+    --c1: #a5b4fc; --c2: #7dd3fc; --c3: #6ee7b7; --c4: #fcd34d;
+    --c5: #f9a8d4; --c6: #c4b5fd; --c7: #94a3b8;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1a1a1e; --card: #232327; --card-2: #1f1f23;
+  --pill: #2d2d33; --pill-hover: #36363d;
+  --seg-track: rgba(255, 255, 255, .035); --seg-thumb: rgba(255, 255, 255, .15);
+  --seg-edge: inset 0 .5px 0 rgba(255, 255, 255, .08), 0 1px 2px rgba(0, 0, 0, .3);
+  --line: #333339; --line-2: #2c2c32;
+  --fg: #ededf1; --fg-2: #b9b9c1; --muted: #8b8b94; --faint: #56565f; --ctl-fg: #a1a1aa;
+  --accent: #a5b4fc; --accent-soft: #2b2c47; --accent-fg: #14142a; --sel: #33345a;
+  --green: #6fd99b; --green-soft: #1e3a2b;
+  --red: #f28b82;   --red-soft: #45272a;
+  --amber: #f2b544; --amber-soft: #3f3220;
+  --pop-bg: rgba(38, 38, 43, .96);
+  --shadow: 0 16px 44px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .3), 0 0 0 .5px rgba(255, 255, 255, .1);
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+  --c1: #a5b4fc; --c2: #7dd3fc; --c3: #6ee7b7; --c4: #fcd34d;
+  --c5: #f9a8d4; --c6: #c4b5fd; --c7: #94a3b8;
+}
+
+/* Okabe–Ito qualitative series [M] */
+:root[data-colorblind="1"] {
+  --c1: #0072b2; --c2: #e69f00; --c3: #009e73; --c4: #d55e00;
+  --c5: #cc79a7; --c6: #56b4e9; --c7: #64748b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"])[data-colorblind="1"] {
+    --c1: #56b4e9; --c2: #fbbf24; --c3: #2dd4bf; --c4: #fb7185;
+    --c5: #e879f9; --c6: #f0e442; --c7: #94a3b8;
+  }
+}
+:root[data-theme="dark"][data-colorblind="1"] {
+  --c1: #56b4e9; --c2: #fbbf24; --c3: #2dd4bf; --c4: #fb7185;
+  --c5: #e879f9; --c6: #f0e442; --c7: #94a3b8;
+}
+
+/* reduced motion: everything collapses to ~instant */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}

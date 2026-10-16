@@ -1,0 +1,478 @@
+{
+  "version": 1,
+  "scene_id": "demo-door",
+  "title": "示例 · 门口的异动",
+  "roles": [
+    {
+      "id": "photo",
+      "name": "摄影师",
+      "color": "#4a90d9",
+      "voice": {
+        "backend": "dsp",
+        "preset": "normal"
+      }
+    },
+    {
+      "id": "wukong",
+      "name": "悟空",
+      "color": "#d9634a",
+      "voice": {
+        "backend": "dsp",
+        "preset": "woman"
+      }
+    }
+  ],
+  "script": {
+    "version": 1,
+    "lines": [
+      {
+        "line_id": "l01",
+        "scene_id": "demo-door",
+        "role_id": "photo",
+        "text": "巷子里怎么这么安静。",
+        "direction": "环顾"
+      },
+      {
+        "line_id": "l02",
+        "scene_id": "demo-door",
+        "role_id": "wukong",
+        "text": "师父说今晚要拍的就是这儿。",
+        "direction": "蹲在墙头"
+      },
+      {
+        "line_id": "l03",
+        "scene_id": "demo-door",
+        "role_id": "photo",
+        "text": "你先下来，我去拿灯。"
+      },
+      {
+        "line_id": "l04",
+        "scene_id": "demo-door",
+        "role_id": "wukong",
+        "text": "灯不够亮的话，我可以变个大的。",
+        "direction": "跳下"
+      },
+      {
+        "line_id": "l05",
+        "scene_id": "demo-door",
+        "role_id": "photo",
+        "text": "等等，那是什么声音？",
+        "direction": "回头"
+      },
+      {
+        "line_id": "l06",
+        "scene_id": "demo-door",
+        "role_id": "wukong",
+        "text": "别动，有人在里面。",
+        "direction": "警觉"
+      },
+      {
+        "line_id": "l07",
+        "scene_id": "demo-door",
+        "role_id": "photo",
+        "text": "要不要先报警？",
+        "direction": "压低声音"
+      },
+      {
+        "line_id": "l08",
+        "scene_id": "demo-door",
+        "role_id": "wukong",
+        "text": "不用，看我的。"
+      },
+      {
+        "line_id": "l09",
+        "scene_id": "demo-door",
+        "role_id": "photo",
+        "text": "门开了——里面站着一个戴帽子的人。",
+        "direction": "全景"
+      },
+      {
+        "line_id": "l10",
+        "scene_id": "demo-door",
+        "role_id": "wukong",
+        "text": "那是师父安排的内应。",
+        "direction": "笑"
+      }
+    ]
+  },
+  "clips": [
+    {
+      "clip_id": "c01",
+      "title": "巷子里怎么这么安…",
+      "dur_ms": 7475,
+      "beats": [
+        {
+          "at_ms": 0,
+          "kind": "camera",
+          "text": "wide"
+        },
+        {
+          "at_ms": 0,
+          "kind": "action",
+          "actor": "photo",
+          "action": "enter",
+          "to": [
+            0.34,
+            0.82
+          ]
+        },
+        {
+          "at_ms": 0,
+          "kind": "action",
+          "actor": "wukong",
+          "action": "enter",
+          "to": [
+            0.66,
+            0.82
+          ]
+        },
+        {
+          "at_ms": 600,
+          "kind": "line",
+          "line_id": "l01",
+          "actor": "photo",
+          "dur_ms": 2830
+        },
+        {
+          "at_ms": 600,
+          "kind": "action",
+          "actor": "photo",
+          "action": "talk",
+          "dur_ms": 2830
+        },
+        {
+          "at_ms": 600,
+          "kind": "camera",
+          "text": "med"
+        },
+        {
+          "at_ms": 3430,
+          "kind": "line",
+          "line_id": "l02",
+          "actor": "wukong",
+          "dur_ms": 3545
+        },
+        {
+          "at_ms": 3430,
+          "kind": "action",
+          "actor": "wukong",
+          "action": "talk",
+          "dur_ms": 3545
+        },
+        {
+          "at_ms": 3430,
+          "kind": "camera",
+          "text": "med"
+        }
+      ],
+      "line_ids": [
+        "l01",
+        "l02"
+      ],
+      "candidates": [
+        {
+          "kind": "draft"
+        }
+      ],
+      "pick": 0,
+      "status": "draft"
+    },
+    {
+      "clip_id": "c02",
+      "title": "你先下来，我去拿…",
+      "dur_ms": 7351,
+      "beats": [
+        {
+          "at_ms": 0,
+          "kind": "camera",
+          "text": "cu"
+        },
+        {
+          "at_ms": 0,
+          "kind": "line",
+          "line_id": "l03",
+          "actor": "photo",
+          "dur_ms": 2830
+        },
+        {
+          "at_ms": 0,
+          "kind": "action",
+          "actor": "photo",
+          "action": "talk",
+          "dur_ms": 2830
+        },
+        {
+          "at_ms": 0,
+          "kind": "camera",
+          "text": "cu"
+        },
+        {
+          "at_ms": 0,
+          "kind": "action",
+          "actor": "photo",
+          "action": "point",
+          "dur_ms": 1200
+        },
+        {
+          "at_ms": 2830,
+          "kind": "line",
+          "line_id": "l04",
+          "actor": "wukong",
+          "dur_ms": 4021
+        },
+        {
+          "at_ms": 2830,
+          "kind": "action",
+          "actor": "wukong",
+          "action": "talk",
+          "dur_ms": 4021
+        },
+        {
+          "at_ms": 2830,
+          "kind": "camera",
+          "text": "med"
+        }
+      ],
+      "line_ids": [
+        "l03",
+        "l04"
+      ],
+      "candidates": [
+        {
+          "kind": "draft"
+        }
+      ],
+      "pick": 0,
+      "status": "draft"
+    },
+    {
+      "clip_id": "c03",
+      "title": "等等，那是什么声…",
+      "dur_ms": 8038,
+      "beats": [
+        {
+          "at_ms": 0,
+          "kind": "camera",
+          "text": "med"
+        },
+        {
+          "at_ms": 0,
+          "kind": "line",
+          "line_id": "l05",
+          "actor": "photo",
+          "dur_ms": 2830
+        },
+        {
+          "at_ms": 0,
+          "kind": "action",
+          "actor": "photo",
+          "action": "talk",
+          "dur_ms": 2830
+        },
+        {
+          "at_ms": 0,
+          "kind": "camera",
+          "text": "med"
+        },
+        {
+          "at_ms": 0,
+          "kind": "action",
+          "actor": "photo",
+          "action": "turn",
+          "dur_ms": 1200
+        },
+        {
+          "at_ms": 2830,
+          "kind": "line",
+          "line_id": "l06",
+          "actor": "wukong",
+          "dur_ms": 2592
+        },
+        {
+          "at_ms": 2830,
+          "kind": "action",
+          "actor": "wukong",
+          "action": "talk",
+          "dur_ms": 2592
+        },
+        {
+          "at_ms": 2830,
+          "kind": "camera",
+          "text": "cu"
+        },
+        {
+          "at_ms": 5422,
+          "kind": "line",
+          "line_id": "l07",
+          "actor": "photo",
+          "dur_ms": 2116
+        },
+        {
+          "at_ms": 5422,
+          "kind": "action",
+          "actor": "photo",
+          "action": "talk",
+          "dur_ms": 2116
+        },
+        {
+          "at_ms": 5422,
+          "kind": "camera",
+          "text": "med"
+        }
+      ],
+      "line_ids": [
+        "l05",
+        "l06",
+        "l07"
+      ],
+      "candidates": [
+        {
+          "kind": "draft"
+        }
+      ],
+      "pick": 0,
+      "status": "draft"
+    },
+    {
+      "clip_id": "c04",
+      "title": "不用，看我的。…",
+      "dur_ms": 7113,
+      "beats": [
+        {
+          "at_ms": 0,
+          "kind": "camera",
+          "text": "med"
+        },
+        {
+          "at_ms": 0,
+          "kind": "line",
+          "line_id": "l08",
+          "actor": "wukong",
+          "dur_ms": 2116
+        },
+        {
+          "at_ms": 0,
+          "kind": "action",
+          "actor": "wukong",
+          "action": "talk",
+          "dur_ms": 2116
+        },
+        {
+          "at_ms": 0,
+          "kind": "camera",
+          "text": "med"
+        },
+        {
+          "at_ms": 2116,
+          "kind": "line",
+          "line_id": "l09",
+          "actor": "photo",
+          "dur_ms": 4497
+        },
+        {
+          "at_ms": 2116,
+          "kind": "action",
+          "actor": "photo",
+          "action": "talk",
+          "dur_ms": 4497
+        },
+        {
+          "at_ms": 2116,
+          "kind": "camera",
+          "text": "cu"
+        },
+        {
+          "at_ms": 2116,
+          "kind": "action",
+          "actor": "photo",
+          "action": "stand",
+          "dur_ms": 1200
+        },
+        {
+          "at_ms": 2116,
+          "kind": "camera",
+          "text": "wide"
+        }
+      ],
+      "line_ids": [
+        "l08",
+        "l09"
+      ],
+      "candidates": [
+        {
+          "kind": "draft"
+        }
+      ],
+      "pick": 0,
+      "status": "draft"
+    },
+    {
+      "clip_id": "c05",
+      "title": "那是师父安排的内…",
+      "dur_ms": 3330,
+      "beats": [
+        {
+          "at_ms": 0,
+          "kind": "camera",
+          "text": "med"
+        },
+        {
+          "at_ms": 0,
+          "kind": "line",
+          "line_id": "l10",
+          "actor": "wukong",
+          "dur_ms": 2830
+        },
+        {
+          "at_ms": 0,
+          "kind": "action",
+          "actor": "wukong",
+          "action": "talk",
+          "dur_ms": 2830
+        },
+        {
+          "at_ms": 0,
+          "kind": "camera",
+          "text": "med"
+        },
+        {
+          "at_ms": 0,
+          "kind": "action",
+          "actor": "wukong",
+          "action": "smile",
+          "dur_ms": 1200
+        }
+      ],
+      "line_ids": [
+        "l10"
+      ],
+      "candidates": [
+        {
+          "kind": "draft"
+        }
+      ],
+      "pick": 0,
+      "status": "draft"
+    }
+  ],
+  "order": [
+    "c01",
+    "c02",
+    "c03",
+    "c04",
+    "c05"
+  ],
+  "audio": {},
+  "feedback": [
+    {
+      "id": "f001",
+      "created": "2026-10-16T00:00:00Z",
+      "scene_ms": 1665,
+      "clip_id": "c05",
+      "line_id": "l09",
+      "kind": "logic",
+      "text": "开门之前缺一个\"察觉异常\"的镜头，否则摄影师的反应没有依据。",
+      "status": "open"
+    }
+  ]
+}

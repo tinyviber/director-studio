@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "voices": {
+    "character-a": {
+      "backend": "dsp",
+      "preset": "natural-woman"
+    },
+    "narrator": {
+      "backend": "dsp",
+      "preset": "normal"
+    }
+  }
+}
