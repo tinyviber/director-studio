@@ -18,7 +18,9 @@ package main
 
 import (
 	crand "crypto/rand"
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -58,7 +60,27 @@ type sceneState struct {
 	mu   sync.Mutex // 串行化本场景的"读-改-写"（rev 检查与保存必须在同一临界区）
 	undo [][]byte
 	redo [][]byte
+	// 音频任务归属（进程内有效——在途任务随进程消失）：
+	// jobSeq 单调分配任务序号；timelineJob/renderJob 记录"当前生效产物
+	// 由哪个 seq 的任务提交"。输入指纹判断产物是否过期，任务序号判断
+	// 产物是否有权替换当前版本——相同输入的旧任务不得覆盖新任务结果。
+	jobSeq      int
+	timelineJob int
+	renderJob   int
 }
+
+// jobSlot 返回某类产物当前的任务槽位。
+func (st *sceneState) jobSlot(kind int) *int {
+	if kind == jobRender {
+		return &st.renderJob
+	}
+	return &st.timelineJob
+}
+
+const (
+	jobTimeline = iota
+	jobRender
+)
 
 func (s *Studio) st(sceneDir string) *sceneState {
 	s.sceneMu.Lock()
@@ -115,6 +137,21 @@ func (s *Studio) saveScene(dir string, sc *Scene, snap bool) error {
 	if old != nil && sc.NextClipSeq < old.NextClipSeq {
 		sc.NextClipSeq = old.NextClipSeq // 分配器单调：undo/回退不回收已发 id
 	}
+	// 非任务写入（手动导入/undo/SaveScene 整份替换等）抢占产物槽位：
+	// 产物指针被显式改动后，任何 seq 更旧的在途任务提交都不能覆盖
+	// 这次指定的结果。并发写路径的调用方都持有 st.mu。
+	st := s.st(dir)
+	oa := AudioState{}
+	if old != nil {
+		oa = old.Audio
+	}
+	if oa.Timeline != sc.Audio.Timeline || oa.TimelineSig != sc.Audio.TimelineSig {
+		st.timelineJob = st.jobSeq
+	}
+	if oa.Rendered != sc.Audio.Rendered || oa.RenderedSig != sc.Audio.RenderedSig ||
+		oa.RenderedStatus != sc.Audio.RenderedStatus {
+		st.renderJob = st.jobSeq
+	}
 	sc.normalize()
 	if err := sc.Validate(); err != nil {
 		return err
@@ -124,6 +161,24 @@ func (s *Studio) saveScene(dir string, sc *Scene, snap bool) error {
 		return err
 	}
 	return dubbing.WriteFileAtomic(sceneFile(dir), b, 0o644)
+}
+
+// fileHash 是文件内容指纹（sha1）。timeline 这类会被原地改写的小文件
+// 用它而不是 size+mtime：同尺寸覆盖写也能检出，且"读内容"与"算指纹"
+// 同源——分开做会在两次读取之间留一个文件可被改写的窗口。
+func hashBytes(b []byte) string {
+	sum := sha1.Sum(b)
+	return hex.EncodeToString(sum[:])
+}
+func fileHash(p string) string {
+	if p == "" {
+		return ""
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	return hashBytes(b)
 }
 
 // fileSig 是文件的轻量指纹（大小+mtime）。配音产物有效性靠它判断；
@@ -515,10 +570,6 @@ func (s *Studio) SaveRecording(workspace, b64wav, name string) string {
 // Analyze 对一条 take 跑 voice-morph 的 ASR + 台本对齐，输出会话目录。
 // takePath 相对 workspace 或绝对路径；script 来自 scene.json 现场转存。
 func (s *Studio) Analyze(sceneDir, takePath string) string {
-	sc, err := loadScene(sceneDir)
-	if err != nil {
-		return errJSON(err)
-	}
 	if !filepath.IsAbs(takePath) {
 		takePath = filepath.Join(filepath.Dir(filepath.Dir(sceneDir)), takePath)
 	}
@@ -529,6 +580,30 @@ func (s *Studio) Analyze(sceneDir, takePath string) string {
 	if err := os.MkdirAll(outBase, 0o755); err != nil {
 		return errJSON(err)
 	}
+	// 同一临界区内：加载最新场景、按需绑定 take（等价 set_take——直接
+	// 调 Analyze 的 agent 不必先发 set_take）、按此刻输入算产物指纹、
+	// 分配任务序号。指纹判"产物是否过期"，seq 判"是否有权提升"。
+	st := s.st(sceneDir)
+	st.mu.Lock()
+	sc, err := loadScene(sceneDir)
+	if err != nil {
+		st.mu.Unlock()
+		return errJSON(err)
+	}
+	if sc.Audio.Take != takePath {
+		sc.Audio.Take, sc.Audio.TakeSig = takePath, fileSig(takePath)
+		if err := s.saveScene(sceneDir, sc, false); err != nil {
+			st.mu.Unlock()
+			return errJSON(err)
+		}
+	}
+	takeSig := sc.Audio.TakeSig
+	tlSig := audioSig(takeSig, sc.scriptSig())
+	seq := st.jobSeq + 1
+	st.jobSeq = seq
+	sb, _ := json.MarshalIndent(sc.Script, "", "  ")
+	st.mu.Unlock()
+
 	// 每次 ASR 独立 job 目录：台本快照 + 输出都在里面——dubbing 在耗时
 	// ASR 结束后才读台本文件，共用固定路径会被后启动的任务中途替换输入。
 	jobDir, err := s.newJobDir(outBase)
@@ -536,16 +611,10 @@ func (s *Studio) Analyze(sceneDir, takePath string) string {
 		return errJSON(err)
 	}
 	tmpScript := filepath.Join(jobDir, "script.json")
-	sb, _ := json.MarshalIndent(sc.Script, "", "  ")
 	if err := dubbing.WriteFileAtomic(tmpScript, sb, 0o644); err != nil {
 		return errJSON(err)
 	}
 	t0 := time.Now()
-	// 产物指纹按任务开始时的真实输入记录（take 指纹 + 此刻的台本）——
-	// 也是提交归属令牌：任务期间输入变了（编辑台本/换 take/另一任务
-	// 先提交），提交时 expected 已不符 → 不提升为当前版本。
-	takeSig := fileSig(takePath)
-	tlSig := audioSig(takeSig, sc.scriptSig())
 	asr, tl, err := dubbing.Analyze(dubbing.AnalyzeOptions{
 		AudioPath: takePath, ScriptPath: tmpScript, OutDir: jobDir,
 	})
@@ -553,7 +622,7 @@ func (s *Studio) Analyze(sceneDir, takePath string) string {
 	if err != nil {
 		return errJSON(err)
 	}
-	promoted, err := s.commitAudioArtifacts(sceneDir, true, tlSig,
+	promoted, err := s.commitAudioArtifacts(sceneDir, true, jobTimeline, seq, tlSig,
 		(*Scene).expectedTimelineSig, func(fresh *Scene) {
 			fresh.Audio.Take, fresh.Audio.TakeSig = takePath, takeSig
 			fresh.Audio.Session = filepath.Dir(tl.ASRFile)
@@ -576,12 +645,15 @@ func (s *Studio) Analyze(sceneDir, takePath string) string {
 }
 
 // commitAudioArtifacts 把耗时任务（ASR/Render）产出的音频状态合并到
-// 最新 scene。jobSig 是任务开始时按真实输入算的指纹，expectedOf(fresh)
-// 是当前文档应得的指纹——只有两者相等（输入没变、本任务仍是当前版本）
-// 才执行 fn 提升产物为生效版本；否则产物留在 job 目录作历史记录，
-// 不覆盖当前生效的引用（例如被后启动但先完成的任务写下的结果）。
-// fn 在 st.mu 临界区内执行；返回 promoted 供调用方提示"结果被取代"。
-func (s *Studio) commitAudioArtifacts(sceneDir string, snap bool, jobSig string, expectedOf func(*Scene) string, fn func(fresh *Scene)) (bool, error) {
+// 最新 scene。两道归属门都必须通过才执行 fn：
+//  1. jobSig == expectedOf(fresh)：产物基于的输入仍是当前输入（没过期）。
+//     指纹只回答"是否过期"，不回答"有没有权替换"。
+//  2. seq > 槽位：本任务是更新任务。相同输入的 A/B 两任务中 B 先提交
+//     （或外部写入抢占了槽位）后，A 后完成不得替换已生效的结果。
+//
+// 不满足时产物留在 job 目录作历史记录，不写指针。fn 在 st.mu 临界区内
+// 执行；返回 promoted 供调用方提示"结果被取代"。
+func (s *Studio) commitAudioArtifacts(sceneDir string, snap bool, kind, seq int, jobSig string, expectedOf func(*Scene) string, fn func(fresh *Scene)) (bool, error) {
 	st := s.st(sceneDir)
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -589,11 +661,15 @@ func (s *Studio) commitAudioArtifacts(sceneDir string, snap bool, jobSig string,
 	if err != nil {
 		return false, err
 	}
-	if jobSig == "" || jobSig != expectedOf(fresh) {
+	if jobSig == "" || jobSig != expectedOf(fresh) || seq <= *st.jobSlot(kind) {
 		return false, nil
 	}
 	fn(fresh)
-	return true, s.saveScene(sceneDir, fresh, snap)
+	if err := s.saveScene(sceneDir, fresh, snap); err != nil {
+		return false, err
+	}
+	*st.jobSlot(kind) = seq
+	return true, nil
 }
 
 // newJobDir 为一次 ASR/Render 建独立目录：输入快照和输出产物都在里面，
@@ -610,31 +686,31 @@ func (s *Studio) newJobDir(parent string) (string, error) {
 
 // RenderScene 跑 dubbing.Render：timeline + voices.json → rendered lines + manifest。
 func (s *Studio) RenderScene(sceneDir string) string {
+	ws := filepath.Dir(filepath.Dir(sceneDir))
+	outBase := filepath.Join(ws, "audio", "dubbing")
+
+	// 同一临界区内：加载最新场景、一次读取 timeline 同时拿到快照内容
+	// 和内容指纹（分开读会留个文件可被改写的窗口）、按此刻音色算
+	// 产物指纹、分配任务序号。
+	st := s.st(sceneDir)
+	st.mu.Lock()
 	sc, err := loadScene(sceneDir)
 	if err != nil {
+		st.mu.Unlock()
 		return errJSON(err)
 	}
 	if sc.Audio.Timeline == "" {
+		st.mu.Unlock()
 		return errf("还没有 timeline——先 Analyze 或手动指定")
 	}
-	ws := filepath.Dir(filepath.Dir(sceneDir))
-	// Render 也进独立 job 目录：timeline/音色输入先快照复制进去——
-	// 渲染期间用户改了输入或另一任务先提交，都不会污染本任务的输入，
-	// 提交时 expected 不符则产物只留作历史。
-	outBase := filepath.Join(ws, "audio", "dubbing")
-	jobDir, err := s.newJobDir(outBase)
-	if err != nil {
-		return errJSON(err)
-	}
-	tlIn := filepath.Join(jobDir, "timeline-input.json")
 	tlBytes, err := os.ReadFile(sc.Audio.Timeline)
 	if err != nil {
+		st.mu.Unlock()
 		return errf("读取 timeline 失败: %v", err)
 	}
-	if err := dubbing.WriteFileAtomic(tlIn, tlBytes, 0o644); err != nil {
-		return errJSON(err)
-	}
-	vp := filepath.Join(jobDir, "voices.json")
+	rdSig := audioSig(hashBytes(tlBytes), sc.voicesSig())
+	seq := st.jobSeq + 1
+	st.jobSeq = seq
 	v := dubbing.Voices{Version: 1, Voices: map[string]dubbing.VoiceProfile{}}
 	for _, r := range sc.Roles {
 		if r.Voice != nil {
@@ -642,12 +718,23 @@ func (s *Studio) RenderScene(sceneDir string) string {
 		}
 	}
 	vb, _ := json.MarshalIndent(v, "", "  ")
+	st.mu.Unlock()
+
+	// Render 也进独立 job 目录：timeline/音色输入先快照复制进去——
+	// 渲染期间用户改了输入或另一任务先提交，都不会污染本任务的输入，
+	// 提交时归属门（指纹+seq）不过则产物只留作历史。
+	jobDir, err := s.newJobDir(outBase)
+	if err != nil {
+		return errJSON(err)
+	}
+	tlIn := filepath.Join(jobDir, "timeline-input.json")
+	if err := dubbing.WriteFileAtomic(tlIn, tlBytes, 0o644); err != nil {
+		return errJSON(err)
+	}
+	vp := filepath.Join(jobDir, "voices.json")
 	if err := dubbing.WriteFileAtomic(vp, vb, 0o644); err != nil {
 		return errJSON(err)
 	}
-	// 归属令牌：渲染启动时的 timeline 文件指纹 + 音色指纹（按原路径算，
-	// 与 expectedRenderedSig 的口径一致）。
-	rdSig := audioSig(fileSig(sc.Audio.Timeline), sc.voicesSig())
 	outDir := filepath.Join(jobDir, "rendered")
 	t0 := time.Now()
 	m, err := dubbing.Render(dubbing.RenderOptions{
@@ -657,7 +744,7 @@ func (s *Studio) RenderScene(sceneDir string) string {
 	if err != nil {
 		return errJSON(err)
 	}
-	promoted, err := s.commitAudioArtifacts(sceneDir, false, rdSig,
+	promoted, err := s.commitAudioArtifacts(sceneDir, false, jobRender, seq, rdSig,
 		(*Scene).expectedRenderedSig, func(fresh *Scene) {
 			fresh.Audio.Rendered = outDir
 			fresh.Audio.RenderedSig = rdSig

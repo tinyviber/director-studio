@@ -175,8 +175,10 @@ func (s *Scene) expectedTimelineSig() string {
 }
 
 // expectedRenderedSig：当前 timeline + 变声参数应产生的 rendered 指纹。
+// timeline 用内容哈希——它会被手动原地改写，size+mtime 可能漏检同尺寸
+// 覆盖写；且哈希与任务读到的字节同源，没有"读完再另算指纹"的窗口。
 func (s *Scene) expectedRenderedSig() string {
-	return audioSig(fileSig(s.Audio.Timeline), s.voicesSig())
+	return audioSig(fileHash(s.Audio.Timeline), s.voicesSig())
 }
 
 // AudioStatus 判断配音产物是否仍有效。过期是传递性的：

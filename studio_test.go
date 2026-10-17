@@ -406,7 +406,7 @@ func TestCommitAudioArtifactsRace(t *testing.T) {
 	}
 
 	// 任务结束：提交产物（指纹是任务开始时算的）→ 输入已变，不提升
-	promoted, err := st.commitAudioArtifacts(dir, true, tlSig,
+	promoted, err := st.commitAudioArtifacts(dir, true, jobTimeline, 1, tlSig,
 		(*Scene).expectedTimelineSig, func(fresh *Scene) {
 			fresh.Audio.Take, fresh.Audio.TakeSig = take, takeSig
 			fresh.Audio.Timeline = filepath.Join(dir, "timeline.json")
@@ -465,7 +465,7 @@ func TestSupersededJobDoesNotOverwrite(t *testing.T) {
 
 	// B 先完成：提升为当前版本
 	tlB := filepath.Join(dir, "job-B", "timeline.json")
-	promoted, err := st.commitAudioArtifacts(dir, true, tlSigB,
+	promoted, err := st.commitAudioArtifacts(dir, true, jobTimeline, 2, tlSigB,
 		(*Scene).expectedTimelineSig, func(fresh *Scene) {
 			fresh.Audio.Take, fresh.Audio.TakeSig = take, takeSig
 			fresh.Audio.Session = filepath.Dir(tlB)
@@ -477,7 +477,7 @@ func TestSupersededJobDoesNotOverwrite(t *testing.T) {
 
 	// A 后完成：不得覆盖 B
 	tlA := filepath.Join(dir, "job-A", "timeline.json")
-	promoted, err = st.commitAudioArtifacts(dir, true, tlSigA,
+	promoted, err = st.commitAudioArtifacts(dir, true, jobTimeline, 1, tlSigA,
 		(*Scene).expectedTimelineSig, func(fresh *Scene) {
 			fresh.Audio.Session = filepath.Dir(tlA)
 			fresh.Audio.Timeline, fresh.Audio.TimelineSig = tlA, tlSigA
@@ -494,6 +494,102 @@ func TestSupersededJobDoesNotOverwrite(t *testing.T) {
 	}
 	if tlStale, _ := cur.AudioStatus(); tlStale {
 		t.Error("B 的产物本应仍然有效")
+	}
+}
+
+// 相同输入的 A、B 两任务：B 先提交且用户已审核其结果，A 后完成不得替换。
+// 输入指纹只能判"是否过期"——判"有没有权替换"要靠任务序号。
+func TestSameInputJobOrdering(t *testing.T) {
+	dir := t.TempDir()
+	st := &Studio{}
+	sc := newSceneWithDraft(t)
+	take := filepath.Join(t.TempDir(), "take.wav")
+	wav, _ := base64.StdEncoding.DecodeString(engineTestWAV(t))
+	os.WriteFile(take, wav, 0o644)
+	sc.Audio.Take, sc.Audio.TakeSig = take, fileSig(take)
+	if err := st.saveScene(dir, sc, false); err != nil {
+		t.Fatal(err)
+	}
+	takeSig := fileSig(take)
+	tlSig := audioSig(takeSig, sc.scriptSig()) // A、B 输入完全相同
+
+	// A(seq1)、B(seq2) 同时跑；B 先完成并提升
+	tlB := filepath.Join(dir, "job-B", "timeline.json")
+	os.MkdirAll(filepath.Dir(tlB), 0o755)
+	os.WriteFile(tlB, []byte(`{"version":1,"segments":[]}`), 0o644)
+	promoted, err := st.commitAudioArtifacts(dir, true, jobTimeline, 2, tlSig,
+		(*Scene).expectedTimelineSig, func(fresh *Scene) {
+			fresh.Audio.Session = filepath.Dir(tlB)
+			fresh.Audio.Timeline, fresh.Audio.TimelineSig = tlB, tlSig
+		})
+	if err != nil || !promoted {
+		t.Fatalf("B 应被提升: promoted=%v err=%v", promoted, err)
+	}
+
+	// 用户审核并修改了 B 的 timeline（文件改写，指针不变）
+	os.WriteFile(tlB, []byte(`{"version":1,"segments":[],"reviewed":true}`), 0o644)
+
+	// A 后完成：输入指纹仍相同，但 seq 更旧 → 无权覆盖已生效的 B
+	tlA := filepath.Join(dir, "job-A", "timeline.json")
+	promoted, err = st.commitAudioArtifacts(dir, true, jobTimeline, 1, tlSig,
+		(*Scene).expectedTimelineSig, func(fresh *Scene) {
+			fresh.Audio.Session = filepath.Dir(tlA)
+			fresh.Audio.Timeline, fresh.Audio.TimelineSig = tlA, tlSig
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted {
+		t.Error("相同输入的旧任务 A 不应覆盖新任务 B 的结果")
+	}
+	cur, _ := loadScene(dir)
+	if cur.Audio.Timeline != tlB {
+		t.Error("已审核的 B 结果不应被替换")
+	}
+}
+
+// 外部写入（整份替换/手动导入）抢占产物槽位：在途旧任务的提交不得覆盖。
+func TestExternalWriteBlocksInFlightJob(t *testing.T) {
+	dir := t.TempDir()
+	st := &Studio{}
+	sc := newSceneWithDraft(t)
+	take := filepath.Join(t.TempDir(), "take.wav")
+	wav, _ := base64.StdEncoding.DecodeString(engineTestWAV(t))
+	os.WriteFile(take, wav, 0o644)
+	sc.Audio.Take, sc.Audio.TakeSig = take, fileSig(take)
+	if err := st.saveScene(dir, sc, false); err != nil {
+		t.Fatal(err)
+	}
+	takeSig := fileSig(take)
+	tlSig := audioSig(takeSig, sc.scriptSig())
+
+	// 任务 seq=2 在途（序号已分配）；期间有人整份写回，换掉 timeline 指针
+	st.st(dir).jobSeq = 2
+	manual := filepath.Join(dir, "manual-timeline.json")
+	os.WriteFile(manual, []byte(`{"version":1,"segments":[]}`), 0o644)
+	cur, err := loadScene(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur.Audio.Timeline, cur.Audio.TimelineSig = manual, cur.expectedTimelineSig()
+	if err := st.saveScene(dir, cur, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// 旧任务随后提交：输入指纹仍匹配，但槽位已被外部写入占满 → 不提升
+	promoted, err := st.commitAudioArtifacts(dir, true, jobTimeline, 2, tlSig,
+		(*Scene).expectedTimelineSig, func(fresh *Scene) {
+			fresh.Audio.Timeline, fresh.Audio.TimelineSig = filepath.Join(dir, "job-x", "timeline.json"), tlSig
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted {
+		t.Error("在途旧任务不应覆盖外部显式写入")
+	}
+	cur, _ = loadScene(dir)
+	if cur.Audio.Timeline != manual {
+		t.Error("手动指定的 timeline 被在途任务覆盖")
 	}
 }
 

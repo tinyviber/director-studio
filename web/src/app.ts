@@ -432,9 +432,8 @@ async function wireVoice() {
       if (r.promoted) {
         state.timeline = await bridge.loadTimeline(r.timeline);
       } else {
-        // 任务期间输入变了（改台本/换 take/另一任务先完成）——
-        // 结果留作历史记录，不采用也不覆盖当前生效的对齐。
-        toast("对齐结果已过期（任务期间输入变更），未采用");
+        // 输入变了或另一任务先完成——结果留作历史记录，不覆盖当前生效的对齐。
+        toast("对齐结果未采用（已有更新版本生效）");
       }
       // 服务端已写好 take/timeline 指纹——以落盘的 scene 为准刷新 UI。
       applyScene(await bridge.loadScene(state.sceneDir), true);
@@ -453,7 +452,7 @@ async function wireVoice() {
       player.invalidateAudio();
       applyScene(await bridge.loadScene(state.sceneDir), true);
       if (!r.promoted) {
-        toast("渲染结果已过期（任务期间输入变更），未采用");
+        toast("渲染结果未采用（已有更新版本生效）");
       } else {
         toast(`渲染完成：${r.lines} 条 · ${r.status}`);
       }
