@@ -45,28 +45,64 @@ function fmt(ms: number) {
 
 // ---------- 场景载入 ----------
 
-async function loadScene(dir: string) {
-  state.sceneDir = dir;
-  state.scene = await bridge.loadScene(dir);
-  player.setScene(state.scene);
-  const mb = await bridge.mediaBase().catch(() => ({ base: "" }));
-  player.mediaBase = mb.base;
-  if (state.scene.audio?.timeline) {
-    state.timeline = await bridge.loadTimeline(state.scene.audio.timeline).catch(() => null);
-    player.timeline = state.timeline;
-  }
-  refreshAll();
-  setSave("已载入 " + state.scene.scene_id);
+// applyScene 把新场景文档同步到播放器。preserve=true（同场景编辑/undo）
+// 保留播放头与音频缓存；false（换场景）全量重置。
+function applyScene(s: Scene, preserve: boolean) {
+  state.scene = s;
+  player.setScene(s, preserve);
+  player.timeline = state.timeline;
+  // manifest 到位后刷一次音频 lane，让"无音"徽标反映真实 rendered 产物
+  if (s.audio?.rendered) void player.loadManifest().then(() => renderTimeline());
 }
 
-async function edit(op: Record<string, unknown>) {
-  if (!state.sceneDir) return;
-  try {
-    const r = await bridge.sceneEdit(state.sceneDir, JSON.stringify(op)) as any;
-    if (r.scene) { state.scene = r.scene; player.setScene(state.scene); }
-    refreshAll();
-    setSave("已保存 ✓");
-  } catch (e) { toast(String(e)); }
+async function loadScene(dir: string) {
+  state.sceneDir = dir;
+  const mb = await bridge.mediaBase().catch(() => ({ base: "", key: "" }));
+  player.mediaBase = mb.base;
+  player.mediaKey = mb.key ?? "";
+  const s = await bridge.loadScene(dir);
+  if (s.audio?.timeline) {
+    state.timeline = await bridge.loadTimeline(s.audio.timeline).catch(() => null);
+  } else {
+    state.timeline = null;
+  }
+  applyScene(s, false);
+  refreshAll();
+  setSave("已载入 " + s.scene_id);
+}
+
+// 编辑串行化：每个 SceneEdit 服务端各自 load→改→save，并发提交会
+// 互相覆盖（lost update）。进队列排队，一次一个在途。
+let editChain: Promise<unknown> = Promise.resolve();
+function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  const p = editChain.then(fn);
+  editChain = p.then(() => undefined, () => undefined);
+  return p;
+}
+
+// edit 返回是否成功——调用方据此决定能不能清空输入/提示完成。
+async function edit(op: Record<string, unknown>): Promise<boolean> {
+  if (!state.sceneDir) return false;
+  return enqueue(async () => {
+    try {
+      const r = await bridge.sceneEdit(state.sceneDir,
+        JSON.stringify({ ...op, base_rev: state.scene?.rev ?? 0 })) as any;
+      if (r.scene) applyScene(r.scene, true);
+      refreshAll();
+      setSave("已保存 ✓");
+      return true;
+    } catch (e) {
+      const msg = String(e);
+      // 版本冲突：别人（含 agent）改过文件——刷新后让用户重试，不静默覆盖。
+      if (msg.includes("已被修改")) {
+        try { applyScene(await bridge.loadScene(state.sceneDir), true); refreshAll(); } catch { /* ignore */ }
+        toast("场景已被外部修改，已刷新——请重试");
+      } else {
+        toast(msg);
+      }
+      return false;
+    }
+  });
 }
 
 // ---------- 台本面板 ----------
@@ -171,6 +207,11 @@ function lineWavs(): Map<string, string> {
       if (seg.line_id && seg.selected && state.scene?.audio?.take) m.set(seg.line_id, state.scene.audio.take);
     }
   }
+  // rendered manifest 里已有 wav 的行也算有音（优先显示 rendered 路径）
+  for (const l of state.scene?.script.lines ?? []) {
+    const p = player.renderedWav(l.line_id);
+    if (p) m.set(l.line_id, p);
+  }
   return m;
 }
 
@@ -253,13 +294,24 @@ async function renderVoice() {
   $("take-list").innerHTML = "";
   if (!s) return;
   // takes: audio.take + rec 目录列不出（没 ls API）→ 显示当前 take + 提供"选文件"
+  const audioStatus = (s.meta?.audio_status ?? {}) as
+    { timeline_stale?: boolean; rendered_stale?: boolean };
   if (s.audio?.take) {
     const d = document.createElement("div");
     d.className = "take";
-    d.innerHTML = `<svg viewBox="0 0 16 16" width="12" height="12" style="flex:none;color:var(--muted)"><rect x="5.5" y="2" width="5" height="8" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 8a5 5 0 0 0 10 0M8 13v2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><span class="nm">${esc(s.audio.take.split("/").pop() ?? "")}</span>`;
+    // rendered_status：指纹一致不代表产物完整——partial/blocked_review/
+    // failed 的 rendered 不进正式预览，这里必须显式标出来。
+    const rs = s.audio.rendered_status ?? "";
+    const rsBadge = s.audio.rendered && rs !== "" && rs !== "complete"
+      ? ` <span class="badge err">渲染${rs === "failed" ? "失败" : rs === "partial" ? "不完整" : "待审核阻塞"}——不进预览</span>` : "";
+    const staleBadges =
+      (audioStatus.timeline_stale ? ` <span class="badge err">对齐已过期——换了录音，需重新 ASR</span>` : "") +
+      (audioStatus.rendered_stale ? ` <span class="badge err">渲染已过期——需重新渲染配音</span>` : "") +
+      rsBadge;
+    d.innerHTML = `<svg viewBox="0 0 16 16" width="12" height="12" style="flex:none;color:var(--muted)"><rect x="5.5" y="2" width="5" height="8" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 8a5 5 0 0 0 10 0M8 13v2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><span class="nm">${esc(s.audio.take.split("/").pop() ?? "")}${staleBadges}</span>`;
     const play = document.createElement("button"); play.textContent = "试听";
     play.onclick = () => {
-      if (player.mediaBase) void new Audio(`${player.mediaBase}?p=${encodeURIComponent(s.audio!.take!)}`).play();
+      if (player.mediaBase) void new Audio(player.mediaURL(s.audio!.take!)).play();
     };
     const morph = document.createElement("button"); morph.textContent = "变声试听";
     morph.onclick = async () => {
@@ -295,7 +347,7 @@ async function renderVoice() {
       const mk = (t: string, fn: () => void) => { const b = document.createElement("button"); b.textContent = t; b.onclick = fn; row.appendChild(b); };
       mk("试听", () => {
         if (s.audio?.take && player.mediaBase) {
-          const a = new Audio(`${player.mediaBase}?p=${encodeURIComponent(s.audio.take)}`);
+          const a = new Audio(player.mediaURL(s.audio.take));
           a.currentTime = seg.start_ms / 1000;
           void a.play(); setTimeout(() => a.pause(), seg.end_ms - seg.start_ms + 200);
         }
@@ -321,8 +373,18 @@ async function renderVoice() {
 async function saveTimeline() {
   if (!state.scene?.audio?.timeline || !state.timeline) return;
   state.timeline.review_count = state.timeline.segments.filter((x) => x.review_required && !x.reviewed).length;
-  await bridge.saveTimelineFile(state.scene.audio.timeline, JSON.stringify(state.timeline));
-  toast("timeline 已存");
+  try {
+    await bridge.saveTimelineFile(state.scene.audio.timeline, JSON.stringify(state.timeline));
+    toast("timeline 已存");
+  } catch (e) {
+    toast("timeline 保存失败: " + e);
+    return;
+  }
+  // timeline 文件已变 → rendered 指纹对不上 → 重载 scene 拿新
+  // audio_status；播放器检测到 stale 位翻转会失效缓存并停止旧配音。
+  if (state.sceneDir) {
+    applyScene(await bridge.loadScene(state.sceneDir), true);
+  }
   renderVoice();
 }
 
@@ -340,7 +402,7 @@ async function wireVoice() {
       const name = `take-${new Date().toISOString().slice(11, 19).replaceAll(":", "")}`;
       const r = await bridge.saveRecording(state.ws, b64, name).catch((e) => { toast(String(e)); return null; });
       if (r?.path) {
-        await editAudio({ take: r.path });
+        await edit({ op: "set_take", path: r.path });
         toast("录音已存 " + r.path.split("/").pop());
       }
     } else {
@@ -358,7 +420,7 @@ async function wireVoice() {
     const name = f.path.split("/").pop()?.replace(/\.wav$/i, "") ?? "take";
     const saved = await bridge.saveRecording(state.ws, r.b64, name).catch((e) => { toast(String(e)); return null; });
     if (saved?.path) {
-      await editAudio({ take: saved.path });
+      await edit({ op: "set_take", path: saved.path });
       toast("已导入 take：" + saved.path.split("/").pop());
     }
   };
@@ -367,33 +429,37 @@ async function wireVoice() {
     setSave("ASR 对齐中…（无 GPU，约几秒-几十秒）");
     try {
       const r = await bridge.analyze(state.sceneDir, state.scene.audio.take) as any;
-      state.timeline = await bridge.loadTimeline(r.timeline);
+      if (r.promoted) {
+        state.timeline = await bridge.loadTimeline(r.timeline);
+      } else {
+        // 输入变了或另一任务先完成——结果留作历史记录，不覆盖当前生效的对齐。
+        toast("对齐结果未采用（已有更新版本生效）");
+      }
+      // 服务端已写好 take/timeline 指纹——以落盘的 scene 为准刷新 UI。
+      applyScene(await bridge.loadScene(state.sceneDir), true);
       player.timeline = state.timeline;
-      if (state.scene.audio) state.scene.audio.timeline = r.timeline;
-      toast(`对齐完成：${r.segments} 段，待审 ${r.review_count}`);
+      if (r.promoted) toast(`对齐完成：${r.segments} 段，待审 ${r.review_count}`);
     } catch (e) { toast("ASR 失败: " + e); }
     setSave("");
-    renderVoice(); renderTimeline();
+    refreshAll();
   };
   $("btn-render").onclick = async () => {
     if (!state.scene?.audio?.timeline) return;
     setSave("离线渲染配音…");
     try {
       const r = await bridge.renderScene(state.sceneDir) as any;
-      if (state.scene.audio) state.scene.audio.rendered = r.rendered;
-      toast(`渲染完成：${r.lines} 条 · ${r.status}`);
+      // rendered 目录可能复用路径、内容已变——丢缓存重新读 manifest。
+      player.invalidateAudio();
+      applyScene(await bridge.loadScene(state.sceneDir), true);
+      if (!r.promoted) {
+        toast("渲染结果未采用（已有更新版本生效）");
+      } else {
+        toast(`渲染完成：${r.lines} 条 · ${r.status}`);
+      }
     } catch (e) { toast("渲染失败: " + e); }
     setSave("");
     renderVoice();
   };
-}
-
-// audio 字段经 SaveScene 更新（走 undo）
-async function editAudio(patch: Partial<Scene["audio"]>) {
-  if (!state.scene) return;
-  state.scene.audio = { ...state.scene.audio, ...patch };
-  await bridge.saveScene(state.sceneDir, JSON.stringify(state.scene)).catch((e) => toast(String(e)));
-  renderVoice(); renderTimeline();
 }
 
 // ---------- 批注面板 ----------
@@ -408,7 +474,11 @@ function renderFeedback() {
     const d = document.createElement("div");
     d.className = `fb ${f.status}`;
     const l = s.script.lines.find((x) => x.line_id === f.line_id);
-    d.innerHTML = `<div class="h"><span>${esc(f.id)} · ${esc(f.kind)} · ${(f.scene_ms / 1000).toFixed(1)}s${f.clip_id ? " · " + esc(f.clip_id) : ""}</span></div>
+    // 批注引用悬空要可见：clip/line 被删或重生成换内容后，不能静默当成还有效。
+    const clipGone = f.clip_id && !s.clips.find((x) => x.clip_id === f.clip_id);
+    const lineGone = f.line_id && !l;
+    const goneBadge = (clipGone || lineGone) ? ` <span class="badge err">目标已变更</span>` : "";
+    d.innerHTML = `<div class="h"><span>${esc(f.id)} · ${esc(f.kind)} · ${(f.scene_ms / 1000).toFixed(1)}s${f.clip_id ? " · " + esc(f.clip_id) : ""}${goneBadge}</span></div>
       <div>${esc(f.text)}${f.voice ? " <span class='badge plain'>语音</span>" : ""}</div>
       ${l ? `<div class="line-ref">→ ${esc(l.line_id)}：${esc(l.text.slice(0, 20))}</div>` : ""}`;
     const foot = document.createElement("div");
@@ -451,7 +521,8 @@ function addFeedback(voicePath?: string) {
     kind: ($("fb-kind") as HTMLInputElement).value || "other",
     text: ($("fb-text") as HTMLTextAreaElement).value,
     voice: voicePath ?? "",
-  }).then(() => {
+  }).then((ok) => {
+    if (!ok) return; // 保存失败保留输入，不能清掉导演写好的批注
     ($("fb-text") as HTMLTextAreaElement).value = "";
     document.querySelector<HTMLButtonElement>(".segs .opt[data-tab=feedback]")?.click();
     toast("批注已记录");
@@ -514,7 +585,7 @@ async function boot() {
   $("btn-gendraft").onclick = async () => {
     if (!state.sceneDir) return toast("先打开场景");
     const r = await bridge.genDraft(state.sceneDir) as any;
-    state.scene = r.scene; player.setScene(state.scene);
+    applyScene(r.scene, true);
     refreshAll();
     toast(`生成 ${r.scene.clips.length} 个 draft clips`);
   };
@@ -524,7 +595,8 @@ async function boot() {
     const t = await bridge.loadTextFile(f.path);
     const parsed = JSON.parse(t.text);
     state.scene.script = parsed;
-    await bridge.saveScene(state.sceneDir, JSON.stringify(state.scene));
+    const saved = await bridge.saveScene(state.sceneDir, JSON.stringify(state.scene)).catch((e) => { toast(String(e)); return null; });
+    if (saved) applyScene(saved, true);
     refreshAll();
     toast("台本已导入——点「生成预演」重建 clips");
   };
@@ -558,11 +630,11 @@ async function boot() {
   };
   $("btn-undo").onclick = async () => {
     const s = await bridge.undo(state.sceneDir).catch((e) => { toast(String(e)); return null; });
-    if (s) { state.scene = s; player.setScene(s); refreshAll(); }
+    if (s) { applyScene(s, true); refreshAll(); }
   };
   $("btn-redo").onclick = async () => {
     const s = await bridge.redo(state.sceneDir).catch((e) => { toast(String(e)); return null; });
-    if (s) { state.scene = s; player.setScene(s); refreshAll(); }
+    if (s) { applyScene(s, true); refreshAll(); }
   };
   $("btn-export-fb").onclick = async () => {
     const r = await bridge.exportFeedback(state.sceneDir).catch((e) => { toast(String(e)); return null; });

@@ -100,9 +100,40 @@ func GenDraft(scene *Scene, preserve []Clip) ([]Clip, []string, error) {
 	}
 	warns := []string{}
 	type prevMap map[string]Clip // key = join(line_ids)
+	// 稳定身份：所有旧 clip_id 都保留。line_ids 一致的 clip 沿用旧 id
+	// （批注/素材引用不失效）；没被复用的旧 id 也不再分配给新内容——
+	// 指向它们的批注会悬空并可被识别，而不是静默指到别的素材上。
+	used := map[string]bool{}
 	prev := prevMap{}
+	// 同一 line_ids 组合可能有多个旧 clip（比如 duplicate 出的副本）：
+	// 有正式视频绑定的优先，其次非 draft 状态，其余按先出现。
+	better := func(a, b Clip) bool {
+		if a.IsFinal() != b.IsFinal() {
+			return a.IsFinal()
+		}
+		if a.Status != b.Status {
+			return a.Status != "draft"
+		}
+		return false
+	}
 	for _, c := range preserve {
-		prev[strings.Join(c.LineIDs, "|")] = c
+		k := strings.Join(c.LineIDs, "|")
+		if old, ok := prev[k]; !ok || better(c, old) {
+			prev[k] = c
+		}
+		used[c.ClipID] = true
+	}
+	// 新 id 来自 scene 的单调分配器：本次之外被淘汰过的序号也不会复用。
+	scene.ensureClipSeq()
+	allocID := func() string {
+		for {
+			id := fmt.Sprintf("c%02d", scene.NextClipSeq)
+			scene.NextClipSeq++
+			if !used[id] {
+				used[id] = true
+				return id
+			}
+		}
 	}
 
 	// 角色顺序 = 台本中首次出现顺序
@@ -131,7 +162,6 @@ func GenDraft(scene *Scene, preserve []Clip) ([]Clip, []string, error) {
 	curBeats := []BeatEvent{}
 	curLines := []string{}
 	curDur := 0
-	clipIdx := 0
 	mkClip := func() {
 		if len(curBeats) == 0 {
 			return
@@ -141,23 +171,28 @@ func GenDraft(scene *Scene, preserve []Clip) ([]Clip, []string, error) {
 			dur = MinClipMs
 		}
 		c := Clip{
-			ClipID: fmt.Sprintf("c%02d", clipIdx+1),
-			DurMs:  dur,
-			Beats:  curBeats,
-			LineIDs: curLines,
-			Status: "draft",
+			DurMs:      dur,
+			Beats:      curBeats,
+			LineIDs:    curLines,
+			Status:     "draft",
 			Candidates: []ClipSource{{Kind: "draft"}},
 		}
-		// 迁移旧 clip 的 source/status（line_ids 一致说明叙事内容没变）
+		// 迁移旧 clip 的身份与全部审核状态（line_ids 一致说明叙事内容
+		// 没变）：candidates/pick/status/stale/出入点/标题/备注/风险。
 		if old, ok := prev[strings.Join(curLines, "|")]; ok {
+			c.ClipID = old.ClipID
 			c.Candidates = old.Candidates
 			c.Pick = old.Pick
 			c.Status = old.Status
+			c.Stale = old.Stale
 			c.T0Ms, c.T1Ms = old.T0Ms, old.T1Ms
 			c.Title = old.Title
+			c.Note = old.Note
+			c.Risk = old.Risk
+		} else {
+			c.ClipID = allocID()
 		}
 		clips = append(clips, c)
-		clipIdx++
 		curBeats, curLines, curDur = nil, nil, 0
 	}
 
@@ -199,8 +234,10 @@ func GenDraft(scene *Scene, preserve []Clip) ([]Clip, []string, error) {
 			lastSpeaker = l.RoleID
 			medTurn++
 		}
-		// direction → 动作/镜头事件（在台词起点附近展开）
-		acts, cams := parseDirBeats(l.Direction + " " + l.Text)
+		// direction → 动作/镜头事件（在台词起点附近展开）。
+		// 只解析导演明确写的 direction，不猜台词正文——"推进工作""进入
+		// 状态"这类普通对白不该意外触发镜头和动作。
+		acts, cams := parseDirBeats(l.Direction)
 		for i, a := range acts {
 			curBeats = append(curBeats, BeatEvent{
 				AtMs: curDur + min(200*i, lDur-1), Kind: "action",
